@@ -172,6 +172,129 @@ describe("postgresEventStore.append", () => {
         })
     })
 
+    describe("when append condition uses Query.all()", () => {
+        test("should successfully append when no prior events exist", async () => {
+            const appendCondition: AppendCondition = {
+                query: Query.all(),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(1)
+        })
+
+        test("should reject append when prior events exceed expectedCeiling", async () => {
+            await eventStore.append(new EventType1())
+            const appendCondition: AppendCondition = {
+                query: Query.all(),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
+                "Expected Version fail: New events matching appendCondition found."
+            )
+        })
+
+        test("should successfully append when prior events are within expectedCeiling", async () => {
+            await eventStore.append(new EventType1())
+            const appendCondition: AppendCondition = {
+                query: Query.all(),
+                expectedCeiling: SequencePosition.create(1)
+            }
+            await eventStore.append(new EventType2(), appendCondition)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(2)
+        })
+    })
+
+    describe("when append condition uses tag-only query (no eventTypes)", () => {
+        test("should successfully append when no prior events match the tag filter", async () => {
+            const appendCondition: AppendCondition = {
+                query: Query.fromItems([{ tags: Tags.from(["some=tag"]) }]),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(1)
+        })
+
+        test("should reject append when prior events with matching tags exceed expectedCeiling", async () => {
+            await eventStore.append(new EventType1(Tags.from(["some=tag"])))
+            const appendCondition: AppendCondition = {
+                query: Query.fromItems([{ tags: Tags.from(["some=tag"]) }]),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await expect(eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)).rejects.toThrow(
+                "Expected Version fail: New events matching appendCondition found."
+            )
+        })
+
+        test("should successfully append when prior events have different tags", async () => {
+            await eventStore.append(new EventType1(Tags.from(["other=tag"])))
+            const appendCondition: AppendCondition = {
+                query: Query.fromItems([{ tags: Tags.from(["some=tag"]) }]),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(2)
+        })
+
+        test("should successfully append with empty tags in query item", async () => {
+            const appendCondition: AppendCondition = {
+                query: Query.fromItems([{ tags: Tags.createEmpty() }]),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await eventStore.append(new EventType1(), appendCondition)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(1)
+        })
+
+        test("should successfully append with explicit empty eventTypes array and tags", async () => {
+            const appendCondition: AppendCondition = {
+                query: Query.fromItems([{ eventTypes: [], tags: Tags.from(["some=tag"]) }]),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(1)
+        })
+
+        test("should handle multiple tag-only query items as OR conditions", async () => {
+            await eventStore.append(new EventType1(Tags.from(["tag1=val1"])))
+            const appendCondition: AppendCondition = {
+                query: Query.fromItems([{ tags: Tags.from(["tag1=val1"]) }, { tags: Tags.from(["tag2=val2"]) }]),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
+                "Expected Version fail: New events matching appendCondition found."
+            )
+        })
+    })
+
+    describe("when append condition uses mixed query items", () => {
+        test("should handle a mix of eventType-only and tag-only query items", async () => {
+            await eventStore.append(new EventType1(Tags.from(["some=tag"])))
+            const appendCondition: AppendCondition = {
+                query: Query.fromItems([{ eventTypes: ["testEvent2"] }, { tags: Tags.from(["some=tag"]) }]),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await expect(eventStore.append(new EventType2(), appendCondition)).rejects.toThrow(
+                "Expected Version fail: New events matching appendCondition found."
+            )
+        })
+
+        test("should succeed when mixed query items find no matching events beyond ceiling", async () => {
+            await eventStore.append(new EventType1(Tags.from(["some=tag"])))
+            const appendCondition: AppendCondition = {
+                query: Query.fromItems([{ eventTypes: ["testEvent2"] }, { tags: Tags.from(["other=tag"]) }]),
+                expectedCeiling: SequencePosition.create(0)
+            }
+            await eventStore.append(new EventType2(), appendCondition)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(2)
+        })
+    })
+
     test("should throw error if given a transaction that is not at isolation level serializable (READ COMMITTED)", async () => {
         const client = await pool.connect()
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED")

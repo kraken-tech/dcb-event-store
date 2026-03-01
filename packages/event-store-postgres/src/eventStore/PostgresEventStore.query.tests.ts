@@ -27,7 +27,7 @@ class EventType2 implements DcbEvent {
     }
 }
 
-describe("memoryEventStore.query", () => {
+describe("postgresEventStore.query", () => {
     let pool: Pool
     let eventStore: PostgresEventStore
     let client: PoolClient
@@ -151,6 +151,22 @@ describe("memoryEventStore.query", () => {
                 )
                 expect(events.length).toBe(1)
                 expect(events[0].event.tags.equals(Tags.fromObj({ testTagKey: "ev-1" }))).toEqual(true)
+            })
+
+            test("should return matching events when query has tags but no eventTypes property", async () => {
+                const events = await streamAllEventsToArray(
+                    eventStore.read(Query.fromItems([{ tags: Tags.fromObj({ testTagKey: "ev-1" }) }]))
+                )
+                expect(events.length).toBe(1)
+                expect(events[0].event.tags.equals(Tags.fromObj({ testTagKey: "ev-1" }))).toEqual(true)
+            })
+
+            test("should return all matching events across types when filtering by tag only", async () => {
+                const events = await streamAllEventsToArray(
+                    eventStore.read(Query.fromItems([{ tags: Tags.fromObj({ testTagKey: "ev-2" }) }]))
+                )
+                expect(events.length).toBe(1)
+                expect(events[0].event.type).toBe("testEvent2")
             })
         })
     })

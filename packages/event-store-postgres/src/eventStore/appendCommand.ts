@@ -8,7 +8,6 @@ export const appendSql = (
     tableName: string
 ): { statement: string; params: unknown[] } => {
     const params = new ParamManager()
-    const maxSeqNoParam = expectedCeiling ? params.add(expectedCeiling.value) : null
     const formattedEvents = events.map(dbEventConverter.toDb)
 
     // Build VALUES clause for new events
@@ -18,9 +17,9 @@ export const appendSql = (
             e =>
                 //prettier-ignore
                 `(
-                    ${params.add(e.type)}, 
-                    ${params.add(e.data)}::JSONB, 
-                    ${params.add(e.metadata)}::JSONB, 
+                    ${params.add(e.type)},
+                    ${params.add(e.data)}::JSONB,
+                    ${params.add(e.metadata)}::JSONB,
                     ${params.add(e.tags)}::text[]
                 )`
         )
@@ -28,19 +27,35 @@ export const appendSql = (
 
     // Build filtering clause if needed
     const filterClause = (): string => {
-        if (!query || query.isAll) return ""
+        if (!query || !expectedCeiling) return ""
+        const maxSeqNoParam = params.add(expectedCeiling.value)
+
+        if (query.isAll) {
+            return `
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM ${tableName}
+                WHERE sequence_position > ${maxSeqNoParam}::bigint
+            )`
+        }
+
         return `
             WHERE NOT EXISTS (
                 ${query.items
-                    .map(
-                        c => `
+                    .map(c => {
+                        const conditions = [
+                            `tags @> ${params.add(c.tags?.values ?? [])}::text[]`,
+                            `sequence_position > ${maxSeqNoParam}::bigint`
+                        ]
+                        if (c.eventTypes?.length) {
+                            conditions.unshift(`type IN (${c.eventTypes.map(t => params.add(t)).join(", ")})`)
+                        }
+                        return `
                             SELECT 1
                             FROM ${tableName}
-                            WHERE type IN (${(c.eventTypes ?? []).map(t => params.add(t)).join(", ")})
-                            AND tags @> ${params.add(c.tags?.values ?? [])}::text[]
-                            AND sequence_position > ${maxSeqNoParam}::bigint
+                            WHERE ${conditions.join("\n                            AND ")}
                         `
-                    )
+                    })
                     .join(" UNION ALL ")}
             )`
     }
