@@ -1,6 +1,5 @@
 import { Query, QueryItem, ReadOptions } from "@dcb-es/event-store"
 import { ParamManager } from "./utils"
-import { PostgresPosition } from "./PostgresPosition"
 
 export const readSqlWithCursor = (query: Query, tableName: string, options?: ReadOptions) => {
     const { sql, params } = readSql(query, tableName, options)
@@ -38,10 +37,10 @@ const tagFilterSnip = (pm: ParamManager, c: QueryItem): string =>
     c.tags && c.tags.length ? `tags && ${pm.add(c.tags.values)}::text[]` : ""
 
 const afterFilter = (pm: ParamManager, tableAlias: string, options?: ReadOptions): string =>
-    options?.after
+    options?.fromPosition
         ? `${tableAlias ? `${tableAlias}.` : ""}sequence_position ${
-              options.backwards ? "<" : ">"
-          } ${pm.add((options.after as PostgresPosition).value)}`
+              options.backwards ? "<=" : ">="
+          } ${pm.add(options.fromPosition.toString())}`
         : ""
 
 const typesFilter = (c: QueryItem, pm: ParamManager): string =>

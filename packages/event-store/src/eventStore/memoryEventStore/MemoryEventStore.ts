@@ -1,33 +1,22 @@
 import { SequencedEvent, EventStore, AppendCondition, DcbEvent, ReadOptions } from "../EventStore"
 import { AppendConditionError } from "../AppendConditionError"
-import { NumericPosition } from "../NumericPosition"
 import { SequencePosition } from "../SequencePosition"
 import { Timestamp } from "../Timestamp"
-import { isInRange, matchesQueryItem } from "./utils"
+import { isInRange, matchesQueryItem, deduplicateEvents } from "./utils"
 import { Query } from "../Query"
 
 const ensureIsArray = (events: DcbEvent | DcbEvent[]) => (Array.isArray(events) ? events : [events])
 
-const asNumeric = (pos: SequencePosition) => (pos as NumericPosition).value
+const nextPosition = (pos: SequencePosition) => SequencePosition.fromString(String(parseInt(pos.toString()) + 1))
+
+const offsetPosition = (pos: SequencePosition, n: number) =>
+    SequencePosition.fromString(String(parseInt(pos.toString()) + n))
 
 const lastPosition = (events: SequencedEvent[]) =>
     events
         .map(event => event.position)
         .filter(pos => pos !== undefined)
-        .pop() || new NumericPosition(0)
-
-const deduplicateEvents = (events: SequencedEvent[]): SequencedEvent[] => {
-    const seen = new Map<number, SequencedEvent>()
-    for (const event of events) {
-        const key = asNumeric(event.position)
-        if (!seen.has(key)) seen.set(key, event)
-    }
-    return Array.from(seen.values())
-}
-
-const byPosition = (a: SequencedEvent, b: SequencedEvent) => asNumeric(a.position) - asNumeric(b.position)
-
-const byPositionDesc = (a: SequencedEvent, b: SequencedEvent) => asNumeric(b.position) - asNumeric(a.position)
+        .pop() || SequencePosition.initial()
 
 export class MemoryEventStore implements EventStore {
     private testListenerRegistry: { read: () => void; append: () => void } = {
@@ -48,23 +37,32 @@ export class MemoryEventStore implements EventStore {
     async *read(query: Query, options?: ReadOptions): AsyncGenerator<SequencedEvent> {
         if (this.testListenerRegistry.read) this.testListenerRegistry.read()
 
+        const step = options?.backwards ? -1 : 1
+        const maxPosition = lastPosition(this.events)
+        const defaultPosition = options?.backwards ? maxPosition : SequencePosition.initial()
+        let currentPosition = options?.fromPosition ?? defaultPosition
         let yieldedCount = 0
 
-        const filterByPosition = (event: SequencedEvent): boolean => {
-            if (!options?.after) return true
-            return isInRange(event.position, options.after, options?.backwards)
-        }
-
         const allMatchedEvents = !query.isAll
-            ? query.items.flatMap((criterion, index) =>
-                  this.events
-                      .filter(event => filterByPosition(event) && matchesQueryItem(criterion, event))
+            ? query.items.flatMap((criterion, index) => {
+                  const matchedEvents = this.events
+                      .filter(
+                          event =>
+                              isInRange(event.position, currentPosition, options?.backwards) &&
+                              matchesQueryItem(criterion, event)
+                      )
                       .map(event => ({ ...event, matchedCriteria: [index.toString()] }))
-                      .sort(byPosition)
-              )
-            : this.events.filter(filterByPosition)
+                      .sort((a, b) => SequencePosition.compare(a.position, b.position))
 
-        const uniqueEvents = deduplicateEvents(allMatchedEvents).sort(options?.backwards ? byPositionDesc : byPosition)
+                  return matchedEvents
+              })
+            : this.events.filter(ev => isInRange(ev.position, currentPosition, options?.backwards))
+
+        const uniqueEvents = deduplicateEvents(allMatchedEvents).sort((a, b) =>
+            options?.backwards
+                ? SequencePosition.compare(b.position, a.position)
+                : SequencePosition.compare(a.position, b.position)
+        )
 
         for (const event of uniqueEvents) {
             yield event
@@ -72,16 +70,17 @@ export class MemoryEventStore implements EventStore {
             if (options?.limit && yieldedCount >= options.limit) {
                 break
             }
+            currentPosition = offsetPosition(event.position, step)
         }
     }
 
     async append(events: DcbEvent | DcbEvent[], appendCondition?: AppendCondition): Promise<void> {
         if (this.testListenerRegistry.append) this.testListenerRegistry.append()
-        const nextValue = asNumeric(lastPosition(this.events)) + 1
+        const next = nextPosition(lastPosition(this.events))
         const sequencedEvents: Array<SequencedEvent> = ensureIsArray(events).map((ev, i) => ({
             event: ev,
             timestamp: Timestamp.now(),
-            position: new NumericPosition(nextValue + i)
+            position: offsetPosition(next, i)
         }))
 
         if (appendCondition) {
@@ -97,7 +96,8 @@ export class MemoryEventStore implements EventStore {
 const getMatchingEvents = (query: Query, after: SequencePosition | undefined, events: SequencedEvent[]) => {
     const filterByPosition = (event: SequencedEvent): boolean => {
         if (!after) return true
-        return event.position.isAfter(after)
+        const fromPosition = nextPosition(after)
+        return isInRange(event.position, fromPosition, false)
     }
 
     if (query.isAll) return events.filter(filterByPosition)

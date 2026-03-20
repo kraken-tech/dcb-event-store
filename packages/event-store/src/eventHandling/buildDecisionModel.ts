@@ -29,7 +29,7 @@ export async function buildDecisionModel<T extends EventHandlers>(
 
     const failIfEventsMatch = Query.fromItems(queryItems)
 
-    let after: SequencePosition | undefined = undefined
+    let after = SequencePosition.initial()
     for await (const sequencedEvent of eventStore.read(failIfEventsMatch)) {
         const { event, position } = sequencedEvent
 
@@ -41,7 +41,7 @@ export async function buildDecisionModel<T extends EventHandlers>(
             const handler = handlerIsRelevant ? eventHandler.when[event.type] : defaultHandler
             states[handlerId] = await handler(sequencedEvent, states[handlerId] as EventHandlerStates<T>)
         }
-        after = position
+        if (position.isAfter(after)) after = position
     }
 
     return { state: states as EventHandlerStates<T>, appendCondition: { failIfEventsMatch, after } }

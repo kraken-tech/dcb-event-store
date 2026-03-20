@@ -2,7 +2,6 @@ import { buildDecisionModel } from "./buildDecisionModel"
 import { CourseCapacity, CourseExists } from "./buildDecisionModel.tests.handlers"
 import { CourseCapacityWasChangedEvent, CourseWasRegisteredEvent } from "./buildDecisionModel.tests.events"
 import { MemoryEventStore } from "../eventStore/memoryEventStore/MemoryEventStore"
-import { NumericPosition } from "../eventStore/NumericPosition"
 import { AppendCondition } from "../eventStore/EventStore"
 import { Tags } from "../eventStore/Tags"
 import { QueryItem } from "../eventStore/Query"
@@ -33,8 +32,8 @@ describe("buildDecisionModel", () => {
                 expect(courseExists).toBe(false)
             })
 
-            test("should have undefined after when no events exist", async () => {
-                expect(appendCondition.after).toBeUndefined()
+            test("should set the maximum sequence number to 0 in appendCondition", async () => {
+                expect(appendCondition?.after.toString()).toBe("0")
             })
 
             test("should have a single event type of 'courseWasRegistered' in appendCondition", async () => {
@@ -72,8 +71,8 @@ describe("buildDecisionModel", () => {
             expect(courseExists).toBe(true)
         })
 
-        test("should set after to the position of the last event", async () => {
-            expect(appendCondition.after!.equals(new NumericPosition(1))).toBe(true)
+        test("should set the maximum sequence number to 1 in appendCondition", async () => {
+            expect(appendCondition?.after.toString()).toBe("1")
         })
 
         test("should have a single event type of 'courseWasRegistered' in appendCondition", async () => {
@@ -115,8 +114,8 @@ describe("buildDecisionModel", () => {
             expect(courseCapacity?.capacity).toBe(15)
         })
 
-        test("should set after to the position of the last event", async () => {
-            expect(appendCondition.after!.equals(new NumericPosition(2))).toBe(true)
+        test("should set the maximum sequence number to 2 in appendCondition", async () => {
+            expect(appendCondition?.after.toString()).toBe("2")
         })
 
         test("should have the 4 correct event types in appendCondition", async () => {
@@ -168,8 +167,8 @@ describe("buildDecisionModel", () => {
             expect(courseCapacity?.capacity).toBe(15)
         })
 
-        test("should set after to the position of the last event", async () => {
-            expect(appendCondition.after!.equals(new NumericPosition(2))).toBe(true)
+        test("should set the maximum sequence number to 2 in appendCondition", async () => {
+            expect(appendCondition?.after.toString()).toBe("2")
         })
 
         test("should have the 4 correct event types in appendCondition", async () => {
@@ -227,7 +226,7 @@ describe("buildDecisionModel", () => {
         })
 
         test("should set after to the last event position", () => {
-            expect(appendCondition.after!.equals(new NumericPosition(1))).toBe(true)
+            expect(appendCondition.after!.toString()).toBe("1")
         })
     })
 })

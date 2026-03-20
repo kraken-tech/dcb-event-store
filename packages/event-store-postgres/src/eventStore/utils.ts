@@ -1,5 +1,4 @@
-import { Tags, DcbEvent, SequencedEvent, Timestamp } from "@dcb-es/event-store"
-import { PostgresPosition } from "./PostgresPosition"
+import { Tags, DcbEvent, SequencedEvent, SequencePosition, Timestamp } from "@dcb-es/event-store"
 
 export type DbWriteEvent = {
     type: string
@@ -25,7 +24,7 @@ export const dbEventConverter = {
         tags: [...dcbEvent.tags.values]
     }),
     fromDb: (dbEvent: DbReadEvent): SequencedEvent => ({
-        position: new PostgresPosition(parseInt(dbEvent.sequence_position)),
+        position: SequencePosition.fromString(dbEvent.sequence_position),
         timestamp: Timestamp.create(dbEvent.timestamp),
         event: {
             type: dbEvent.type,
