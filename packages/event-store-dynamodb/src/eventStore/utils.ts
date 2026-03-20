@@ -4,6 +4,8 @@ const SEQ_PAD_LENGTH = 16
 
 export const padSeqPos = (pos: number): string => pos.toString().padStart(SEQ_PAD_LENGTH, "0")
 
+export const parseSeqPos = (padded: string): number => parseInt(padded, 10)
+
 export type DynamoEventItem = {
     PK: string
     SK: string
@@ -14,6 +16,17 @@ export type DynamoEventItem = {
     timestamp: string
     seqPos: number
     batchId?: string
+}
+
+export type DynamoPointerItem = {
+    PK: string
+    SK: string
+    seqPos: number
+}
+
+export type DynamoWriteBatch = {
+    event: DynamoEventItem
+    pointers: DynamoPointerItem[]
 }
 
 export const toEventEnvelope = (item: DynamoEventItem): EventEnvelope => ({
@@ -27,12 +40,14 @@ export const toEventEnvelope = (item: DynamoEventItem): EventEnvelope => ({
     }
 })
 
-export const toDynamoEventItems = (event: DcbEvent, seqPos: number, batchId?: string): DynamoEventItem[] => {
+export const buildWriteBatch = (event: DcbEvent, seqPos: number, batchId?: string): DynamoWriteBatch => {
     const timestamp = new Date().toISOString()
     const sk = padSeqPos(seqPos)
     const tags = [...event.tags.values]
 
-    const base = {
+    const eventItem: DynamoEventItem = {
+        PK: `E#${seqPos}`,
+        SK: "E",
         type: event.type,
         tags,
         data: event.data as Record<string, unknown>,
@@ -42,16 +57,15 @@ export const toDynamoEventItems = (event: DcbEvent, seqPos: number, batchId?: st
         ...(batchId ? { batchId } : {})
     }
 
-    const items: DynamoEventItem[] = [
-        { PK: `E#${seqPos}`, SK: "E", ...base },
-        { PK: `IT#${event.type}`, SK: sk, ...base },
-        { PK: `A#${Math.floor(seqPos / 10000)}`, SK: sk, ...base }
+    const pointers: DynamoPointerItem[] = [
+        { PK: `IT#${event.type}`, SK: sk, seqPos },
+        { PK: `A#${Math.floor(seqPos / 10000)}`, SK: sk, seqPos }
     ]
 
     for (const tag of tags) {
-        items.push({ PK: `I#${event.type}#${tag}`, SK: sk, ...base })
-        items.push({ PK: `IG#${tag}`, SK: sk, ...base })
+        pointers.push({ PK: `I#${event.type}#${tag}`, SK: sk, seqPos })
+        pointers.push({ PK: `IG#${tag}`, SK: sk, seqPos })
     }
 
-    return items
+    return { event: eventItem, pointers }
 }
