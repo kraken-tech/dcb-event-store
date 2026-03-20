@@ -40,7 +40,7 @@ const fromSeqNoFilter = (pm: ParamManager, tableAlias: string, options?: ReadOpt
     options?.fromPosition
         ? `${tableAlias ? `${tableAlias}.` : ""}sequence_position ${
               options.backwards ? "<=" : ">="
-          } ${pm.add(options.fromPosition.value)}`
+          } ${pm.add(options.fromPosition.toString())}`
         : ""
 
 const typesFilter = (c: QueryItem, pm: ParamManager): string =>

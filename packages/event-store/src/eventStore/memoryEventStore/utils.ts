@@ -3,18 +3,19 @@ import { SequencePosition } from "../SequencePosition"
 import { matchTags } from "../../eventHandling/matchTags"
 import { QueryItem } from "../Query"
 
-export const isSeqOutOfRange = (
+export const isInRange = (
     sequencePosition: SequencePosition,
     fromPosition: SequencePosition,
     backwards: boolean | undefined
-) => (backwards ? sequencePosition > fromPosition : sequencePosition < fromPosition)
+) => (backwards ? !sequencePosition.isAfter(fromPosition) : !sequencePosition.isBefore(fromPosition))
 
 export const deduplicateEvents = (events: SequencedEvent[]): SequencedEvent[] => {
-    const uniqueEventsMap = new Map<number, SequencedEvent>()
+    const uniqueEventsMap = new Map<string, SequencedEvent>()
 
     for (const event of events) {
-        if (!uniqueEventsMap.has(event.position.value)) {
-            uniqueEventsMap.set(event.position.value, event)
+        const key = event.position.toString()
+        if (!uniqueEventsMap.has(key)) {
+            uniqueEventsMap.set(key, event)
         }
     }
 

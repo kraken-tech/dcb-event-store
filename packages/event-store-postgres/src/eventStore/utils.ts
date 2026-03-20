@@ -24,7 +24,7 @@ export const dbEventConverter = {
         tags: [...dcbEvent.tags.values]
     }),
     fromDb: (dbEvent: DbReadEvent): SequencedEvent => ({
-        position: SequencePosition.create(parseInt(dbEvent.sequence_position)),
+        position: SequencePosition.fromString(dbEvent.sequence_position),
         timestamp: Timestamp.create(dbEvent.timestamp),
         event: {
             type: dbEvent.type,

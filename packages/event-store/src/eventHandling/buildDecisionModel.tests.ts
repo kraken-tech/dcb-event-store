@@ -33,7 +33,7 @@ describe("buildDecisionModel", () => {
             })
 
             test("should set the maximum sequence number to 0 in appendCondition", async () => {
-                expect(appendCondition?.after.value).toBe(0)
+                expect(appendCondition?.after.toString()).toBe("0")
             })
 
             test("should have a single event type of 'courseWasRegistered' in appendCondition", async () => {
@@ -72,7 +72,7 @@ describe("buildDecisionModel", () => {
         })
 
         test("should set the maximum sequence number to 1 in appendCondition", async () => {
-            expect(appendCondition?.after.value).toBe(1)
+            expect(appendCondition?.after.toString()).toBe("1")
         })
 
         test("should have a single event type of 'courseWasRegistered' in appendCondition", async () => {
@@ -115,7 +115,7 @@ describe("buildDecisionModel", () => {
         })
 
         test("should set the maximum sequence number to 2 in appendCondition", async () => {
-            expect(appendCondition?.after.value).toBe(2)
+            expect(appendCondition?.after.toString()).toBe("2")
         })
 
         test("should have the 4 correct event types in appendCondition", async () => {
@@ -168,7 +168,7 @@ describe("buildDecisionModel", () => {
         })
 
         test("should set the maximum sequence number to 2 in appendCondition", async () => {
-            expect(appendCondition?.after.value).toBe(2)
+            expect(appendCondition?.after.toString()).toBe("2")
         })
 
         test("should have the 4 correct event types in appendCondition", async () => {

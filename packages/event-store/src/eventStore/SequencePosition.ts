@@ -1,40 +1,40 @@
 export class SequencePosition {
     #value: number
 
-    get value(): number {
-        return this.#value
-    }
-
     private constructor(value: number) {
         this.#value = value
     }
 
-    [Symbol.toPrimitive]() {
-        return this.#value
+    isAfter(other: SequencePosition): boolean {
+        return this.#value > other.#value
     }
 
-    valueOf(): number {
-        return this.#value
+    isBefore(other: SequencePosition): boolean {
+        return this.#value < other.#value
     }
 
-    inc(): SequencePosition {
-        return SequencePosition.create(this.#value + 1)
+    equals(other: SequencePosition): boolean {
+        return this.#value === other.#value
     }
 
-    plus(value: number): SequencePosition {
-        return SequencePosition.create(this.#value + value)
+    toString(): string {
+        return this.#value.toString()
     }
 
-    static create(sequencePosition: number): SequencePosition {
-        if (sequencePosition === undefined || sequencePosition === null)
-            throw new Error("Sequence number cannot be null")
-        if (!Number.isInteger(sequencePosition)) throw new Error("Sequence number needs to be a valid integer")
-        if (sequencePosition < 0) throw new Error("Sequence number must be greater than 0")
-
-        return new SequencePosition(sequencePosition)
+    static fromString(s: string): SequencePosition {
+        const parsed = parseInt(s, 10)
+        if (isNaN(parsed) || String(parsed) !== s) throw new Error(`Invalid position string: "${s}"`)
+        if (parsed < 0) throw new Error("Sequence position must be >= 0")
+        return new SequencePosition(parsed)
     }
 
-    static zero(): SequencePosition {
-        return SequencePosition.create(0)
+    static compare(a: SequencePosition, b: SequencePosition): number {
+        if (a.#value < b.#value) return -1
+        if (a.#value > b.#value) return 1
+        return 0
+    }
+
+    static initial(): SequencePosition {
+        return new SequencePosition(0)
     }
 }

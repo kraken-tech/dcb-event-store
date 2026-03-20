@@ -28,7 +28,7 @@ export const appendSql = (
     // Build filtering clause if needed
     const filterClause = (): string => {
         if (!failIfEventsMatch || !after) return ""
-        const maxSeqNoParam = params.add(after.value)
+        const maxSeqNoParam = params.add(after.toString())
 
         if (failIfEventsMatch.isAll) {
             return `
