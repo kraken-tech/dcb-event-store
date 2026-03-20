@@ -1,5 +1,4 @@
-import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb"
-import { DcbEvent, Query, SequencePosition, streamAllEventsToArray, Tags } from "@dcb-es/event-store"
+import { DcbEvent, Query, streamAllEventsToArray, Tags } from "@dcb-es/event-store"
 import { DynamoEventStore } from "./DynamoEventStore"
 import { getTestDynamoTable } from "@test/testDynamoClient"
 

@@ -12,7 +12,7 @@ import {
     ReadOptions,
     Query
 } from "@dcb-es/event-store"
-import { buildWriteBatch, DynamoEventItem, DynamoPointerItem } from "./utils"
+import { buildWriteBatch, DynamoEventItem, DynamoPointerItem, chunk } from "./utils"
 import { ensureInstalled } from "./ensureInstalled"
 import { readFromDynamo } from "./readDynamo"
 
@@ -80,14 +80,8 @@ export class DynamoEventStore implements EventStore {
     }
 
     private async batchWriteItems(items: (DynamoEventItem | DynamoPointerItem)[]): Promise<void> {
-        const BATCH_SIZE = 25
-        const batches: (DynamoEventItem | DynamoPointerItem)[][] = []
-        for (let i = 0; i < items.length; i += BATCH_SIZE) {
-            batches.push(items.slice(i, i + BATCH_SIZE))
-        }
-
         await Promise.all(
-            batches.map(async batch => {
+            chunk(items, 25).map(async batch => {
                 const requestItems = batch.map(item => ({
                     PutRequest: { Item: item }
                 }))

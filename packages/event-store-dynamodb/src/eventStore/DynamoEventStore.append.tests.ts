@@ -1,4 +1,3 @@
-import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb"
 import { AppendCondition, DcbEvent, Query, SequencePosition, streamAllEventsToArray, Tags } from "@dcb-es/event-store"
 import { DynamoEventStore } from "./DynamoEventStore"
 import { getTestDynamoTable } from "@test/testDynamoClient"
@@ -27,19 +26,19 @@ class EventType2 implements DcbEvent {
     }
 }
 
+const createEventStore = async () => {
+    const { client, tableName } = await getTestDynamoTable()
+    return new DynamoEventStore(client, tableName)
+}
+
 describe("DynamoEventStore.append", () => {
-    let client: DynamoDBDocumentClient
-    let tableName: string
-    let eventStore: DynamoEventStore
-
-    beforeAll(async () => {
-        const testTable = await getTestDynamoTable()
-        client = testTable.client
-        tableName = testTable.tableName
-        eventStore = new DynamoEventStore(client, tableName)
-    })
-
     describe("when event store is empty", () => {
+        let eventStore: DynamoEventStore
+
+        beforeAll(async () => {
+            eventStore = await createEventStore()
+        })
+
         test("should return an empty array when no events are stored", async () => {
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
             expect(events.length).toBe(0)
@@ -53,7 +52,6 @@ describe("DynamoEventStore.append", () => {
         })
 
         test("should store and return metadata on event successfully", async () => {
-            await eventStore.append(new EventType1())
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
             const lastEvent = events.at(-1)?.event as EventType1
             expect(lastEvent.metadata.userId).toBe("user-1")
@@ -61,6 +59,12 @@ describe("DynamoEventStore.append", () => {
     })
 
     describe("append condition validation", () => {
+        let eventStore: DynamoEventStore
+
+        beforeAll(async () => {
+            eventStore = await createEventStore()
+        })
+
         test("should reject Query.all() in append conditions", async () => {
             const appendCondition: AppendCondition = {
                 query: Query.all(),
@@ -93,28 +97,28 @@ describe("DynamoEventStore.append", () => {
     })
 
     describe("append without condition", () => {
+        let eventStore: DynamoEventStore
+
+        beforeAll(async () => {
+            eventStore = await createEventStore()
+        })
+
         test("should append events without any condition", async () => {
-            const before = await streamAllEventsToArray(eventStore.read(Query.all()))
             await eventStore.append(new EventType1())
             await eventStore.append(new EventType2())
-            const after = await streamAllEventsToArray(eventStore.read(Query.all()))
-            expect(after.length).toBe(before.length + 2)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(2)
         })
 
         test("should assign increasing sequence positions", async () => {
-            const before = await streamAllEventsToArray(eventStore.read(Query.all()))
-            await eventStore.append(new EventType1())
-            await eventStore.append(new EventType1())
-            const after = await streamAllEventsToArray(eventStore.read(Query.all()))
-            const newEvents = after.slice(before.length)
-            expect(newEvents[1].sequencePosition.value).toBeGreaterThan(newEvents[0].sequencePosition.value)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events[1].sequencePosition.value).toBeGreaterThan(events[0].sequencePosition.value)
         })
 
         test("should append multiple events in a single call", async () => {
-            const before = await streamAllEventsToArray(eventStore.read(Query.all()))
             await eventStore.append([new EventType1(), new EventType1(), new EventType2()])
-            const after = await streamAllEventsToArray(eventStore.read(Query.all()))
-            expect(after.length).toBe(before.length + 3)
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(5)
         })
     })
 })
