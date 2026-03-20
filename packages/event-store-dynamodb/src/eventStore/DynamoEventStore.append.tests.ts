@@ -1,10 +1,22 @@
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb"
-import { AppendCondition, DcbEvent, Query, SequencePosition, Tags } from "@dcb-es/event-store"
+import { AppendCondition, DcbEvent, Query, SequencePosition, streamAllEventsToArray, Tags } from "@dcb-es/event-store"
 import { DynamoEventStore } from "./DynamoEventStore"
 import { getTestDynamoTable } from "@test/testDynamoClient"
 
 class EventType1 implements DcbEvent {
     type: "testEvent1" = "testEvent1"
+    tags: Tags
+    data: Record<string, never>
+    metadata: { userId: string } = { userId: "user-1" }
+
+    constructor(tags: Tags = Tags.from(["default=tag"])) {
+        this.tags = tags
+        this.data = {}
+    }
+}
+
+class EventType2 implements DcbEvent {
+    type: "testEvent2" = "testEvent2"
     tags: Tags
     data: Record<string, never>
     metadata: { userId: string } = { userId: "user-1" }
@@ -25,6 +37,27 @@ describe("DynamoEventStore.append", () => {
         client = testTable.client
         tableName = testTable.tableName
         eventStore = new DynamoEventStore(client, tableName)
+    })
+
+    describe("when event store is empty", () => {
+        test("should return an empty array when no events are stored", async () => {
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(0)
+        })
+
+        test("should assign a sequence position on appending the first event", async () => {
+            await eventStore.append(new EventType1())
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(events.length).toBe(1)
+            expect(events[0].sequencePosition.value).toBeGreaterThan(0)
+        })
+
+        test("should store and return metadata on event successfully", async () => {
+            await eventStore.append(new EventType1())
+            const events = await streamAllEventsToArray(eventStore.read(Query.all()))
+            const lastEvent = events.at(-1)?.event as EventType1
+            expect(lastEvent.metadata.userId).toBe("user-1")
+        })
     })
 
     describe("append condition validation", () => {
@@ -56,6 +89,32 @@ describe("DynamoEventStore.append", () => {
             await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
                 "DynamoDB adapter requires tags"
             )
+        })
+    })
+
+    describe("append without condition", () => {
+        test("should append events without any condition", async () => {
+            const before = await streamAllEventsToArray(eventStore.read(Query.all()))
+            await eventStore.append(new EventType1())
+            await eventStore.append(new EventType2())
+            const after = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(after.length).toBe(before.length + 2)
+        })
+
+        test("should assign increasing sequence positions", async () => {
+            const before = await streamAllEventsToArray(eventStore.read(Query.all()))
+            await eventStore.append(new EventType1())
+            await eventStore.append(new EventType1())
+            const after = await streamAllEventsToArray(eventStore.read(Query.all()))
+            const newEvents = after.slice(before.length)
+            expect(newEvents[1].sequencePosition.value).toBeGreaterThan(newEvents[0].sequencePosition.value)
+        })
+
+        test("should append multiple events in a single call", async () => {
+            const before = await streamAllEventsToArray(eventStore.read(Query.all()))
+            await eventStore.append([new EventType1(), new EventType1(), new EventType2()])
+            const after = await streamAllEventsToArray(eventStore.read(Query.all()))
+            expect(after.length).toBe(before.length + 3)
         })
     })
 })
