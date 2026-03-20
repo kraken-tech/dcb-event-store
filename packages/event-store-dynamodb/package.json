@@ -1,0 +1,34 @@
+{
+    "name": "@dcb-es/event-store-dynamodb",
+    "description": "DynamoDB implementation of event store from @dcb-es/event-store",
+    "author": "Paul Grimshaw",
+    "license": "MIT",
+    "version": "0.1.0",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:coverage": "vitest run --coverage",
+        "build": "tsc -p tsconfig.json",
+        "watch": "tsc -w -p tsconfig.json",
+        "lint": "eslint \"**/*.ts\" .",
+        "lint-fix": "eslint \"**/*.ts\" . --fix",
+        "prepare": "yarn build"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/sennentech/dcb-event-store.git"
+    },
+    "dependencies": {
+        "@dcb-es/event-store": "^5.1.3",
+        "@aws-sdk/client-dynamodb": "^3.700.0",
+        "@aws-sdk/lib-dynamodb": "^3.700.0"
+    },
+    "devDependencies": {
+        "testcontainers": "^10.9.0"
+    },
+    "publishConfig": {
+        "access": "public"
+    }
+}
