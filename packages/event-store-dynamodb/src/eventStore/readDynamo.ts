@@ -13,6 +13,8 @@ export async function* readFromDynamo(
     query: Query,
     options?: ReadOptions
 ): AsyncGenerator<SequencedEvent> {
+    const committedBatchCache = new Set<string>()
+    const failedBatchCache = new Set<string>()
     const reader = createReader(client, tableName)
 
     const seqPositions = query.isAll
@@ -23,9 +25,14 @@ export async function* readFromDynamo(
 
     let count = 0
     for (const batch of chunk(dedupedPositions, 100)) {
-        // BatchGetItem returns items in arbitrary order — re-sort each batch
-        const events = await reader.batchGetEvents(batch)
-        const ordered = events.sort((a, b) => {
+        const rawEvents = await reader.batchGetEventsWithItems(batch)
+
+        // Filter by batch status
+        const visibleEvents = await filterByBatchStatus(
+            client, tableName, rawEvents, committedBatchCache, failedBatchCache
+        )
+
+        const ordered = visibleEvents.sort((a, b) => {
             const diff = a.position.value - b.position.value
             return options?.backwards ? -diff : diff
         })
@@ -36,6 +43,68 @@ export async function* readFromDynamo(
             count++
         }
     }
+}
+
+async function filterByBatchStatus(
+    client: DynamoDBDocumentClient,
+    tableName: string,
+    events: { item: DynamoEventItem; sequenced: SequencedEvent }[],
+    committedCache: Set<string>,
+    failedCache: Set<string>
+): Promise<SequencedEvent[]> {
+    // Separate events with and without batchId
+    const visible: SequencedEvent[] = []
+    const needsCheck: { item: DynamoEventItem; sequenced: SequencedEvent }[] = []
+
+    for (const entry of events) {
+        if (!entry.item.batchId) {
+            visible.push(entry.sequenced)
+        } else if (committedCache.has(entry.item.batchId)) {
+            visible.push(entry.sequenced)
+        } else if (failedCache.has(entry.item.batchId)) {
+            // Skip — FAILED batch
+        } else {
+            needsCheck.push(entry)
+        }
+    }
+
+    if (needsCheck.length === 0) return visible
+
+    // Batch-fetch unknown batch statuses
+    const unknownBatchIds = [...new Set(needsCheck.map(e => e.item.batchId!))]
+    const batchKeys = unknownBatchIds.map(id => ({ PK: `_BATCH#${id}`, SK: `_BATCH#${id}` }))
+
+    for (const keyChunk of chunk(batchKeys, 100)) {
+        const result = await client.send(
+            new BatchGetCommand({
+                RequestItems: { [tableName]: { Keys: keyChunk, ConsistentRead: true } }
+            })
+        )
+        for (const item of result.Responses?.[tableName] ?? []) {
+            const batchId = (item.PK as string).replace("_BATCH#", "")
+            if (item.status === "COMMITTED") {
+                committedCache.add(batchId)
+            } else {
+                failedCache.add(batchId)
+            }
+        }
+        // Missing batch records are treated as failed
+        for (const key of keyChunk) {
+            const batchId = (key.PK as string).replace("_BATCH#", "")
+            if (!committedCache.has(batchId) && !failedCache.has(batchId)) {
+                failedCache.add(batchId)
+            }
+        }
+    }
+
+    // Re-check with populated cache
+    for (const entry of needsCheck) {
+        if (committedCache.has(entry.item.batchId!)) {
+            visible.push(entry.sequenced)
+        }
+    }
+
+    return visible
 }
 
 function createReader(client: DynamoDBDocumentClient, tableName: string) {
@@ -78,9 +147,14 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
     }
 
     async function batchGetEvents(seqPositions: number[]): Promise<SequencedEvent[]> {
+        const results = await batchGetEventsWithItems(seqPositions)
+        return results.map(r => r.sequenced)
+    }
+
+    async function batchGetEventsWithItems(seqPositions: number[]): Promise<{ item: DynamoEventItem; sequenced: SequencedEvent }[]> {
         if (seqPositions.length === 0) return []
 
-        const envelopes: SequencedEvent[] = []
+        const entries: { item: DynamoEventItem; sequenced: SequencedEvent }[] = []
 
         for (const batch of chunk(seqPositions, 100)) {
             const keys = batch.map(pos => ({ PK: `E#${pos}`, SK: "E" }))
@@ -94,11 +168,12 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
             )
 
             for (const item of result.Responses?.[tableName] ?? []) {
-                envelopes.push(toSequencedEvent(item as DynamoEventItem))
+                const dynamoItem = item as DynamoEventItem
+                entries.push({ item: dynamoItem, sequenced: toSequencedEvent(dynamoItem) })
             }
         }
 
-        return envelopes
+        return entries
     }
 
     async function getMaxBucket(): Promise<number> {
@@ -232,7 +307,7 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
             .map(env => env.position.value)
     }
 
-    return { collectFromBuckets, collectFromQueryItems, batchGetEvents }
+    return { collectFromBuckets, collectFromQueryItems, batchGetEvents, batchGetEventsWithItems }
 }
 
 function deduplicateAndSort(positions: number[], backwards?: boolean): number[] {

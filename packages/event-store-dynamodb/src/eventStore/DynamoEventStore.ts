@@ -2,21 +2,30 @@ import {
     DynamoDBDocumentClient,
     UpdateCommand,
     BatchWriteCommand,
-    PutCommand
+    PutCommand,
+    QueryCommand,
+    ScanCommand,
+    GetCommand
 } from "@aws-sdk/lib-dynamodb"
 import {
     EventStore,
     DcbEvent,
     AppendCondition,
+    AppendConditionError,
     SequencedEvent,
     ReadOptions,
-    Query
+    Query,
+    Tags
 } from "@dcb-es/event-store"
-import { buildWriteBatch, DynamoEventItem, DynamoPointerItem, chunk } from "./utils"
+import { buildWriteBatch, DynamoEventItem, DynamoPointerItem, chunk, padSeqPos } from "./utils"
 import { ensureInstalled } from "./ensureInstalled"
 import { readFromDynamo } from "./readDynamo"
+import { acquireLocks, releaseLocks, startHeartbeat, HeartbeatHandle } from "./lockManager"
 
 const MAX_BATCH_WRITE_RETRIES = 5
+const DEFAULT_LEASE_MS = 30_000
+const DEFAULT_HEARTBEAT_MS = 10_000
+const DEFAULT_LOCK_TIMEOUT_MS = 30_000
 
 export class DynamoEventStore implements EventStore {
     constructor(
@@ -34,8 +43,8 @@ export class DynamoEventStore implements EventStore {
 
         if (condition) {
             this.validateAppendCondition(condition)
-            // TODO: implement lock-based conditional append (#44)
-            throw new Error("Append conditions not yet implemented")
+            await this.appendWithCondition(eventArray, condition)
+            return
         }
 
         const startSeq = await this.reserveSequenceRange(eventArray.length)
@@ -47,6 +56,241 @@ export class DynamoEventStore implements EventStore {
         }
 
         await this.batchWriteItems(allItems)
+    }
+
+    private async appendWithCondition(events: DcbEvent[], condition: AppendCondition): Promise<void> {
+        // Step 1: Create batch record
+        const batchId = crypto.randomUUID()
+        await this.createBatchRecord(batchId)
+
+        // Step 2: Compute lock keys
+        const lockKeys = this.computeLockKeys(condition, events)
+
+        // Step 3: Acquire locks
+        const lockResult = await acquireLocks(this.client, this.tableName, lockKeys, batchId, {
+            leaseDurationMs: DEFAULT_LEASE_MS,
+            timeoutMs: DEFAULT_LOCK_TIMEOUT_MS
+        })
+
+        if (!lockResult.acquired) {
+            throw new AppendConditionError(condition)
+        }
+
+        // Step 3b: Start heartbeat
+        let heartbeat: HeartbeatHandle | undefined
+        try {
+            heartbeat = startHeartbeat(this.client, this.tableName, lockKeys, batchId, {
+                intervalMs: DEFAULT_HEARTBEAT_MS,
+                leaseDurationMs: DEFAULT_LEASE_MS
+            })
+
+            // Step 4: Check append condition (strongly consistent reads)
+            await this.checkCondition(condition)
+
+            // Step 5: Reserve sequence range
+            const startSeq = await this.reserveSequenceRange(events.length)
+
+            // Update batch with sequence range
+            await this.client.send(
+                new UpdateCommand({
+                    TableName: this.tableName,
+                    Key: { PK: `_BATCH#${batchId}`, SK: `_BATCH#${batchId}` },
+                    UpdateExpression: "SET seqStart = :start, seqEnd = :end",
+                    ExpressionAttributeValues: { ":start": startSeq + 1, ":end": startSeq + events.length }
+                })
+            )
+
+            // Step 6: Write events with batchId
+            const allItems: (DynamoEventItem | DynamoPointerItem)[] = []
+            for (let i = 0; i < events.length; i++) {
+                const batch = buildWriteBatch(events[i], startSeq + i + 1, batchId)
+                allItems.push(batch.event, ...batch.pointers)
+            }
+            await this.batchWriteItems(allItems)
+
+            // Step 7: Fenced commit
+            await this.commitBatch(batchId)
+
+            // Step 7b: Advance _COMMITTED_THROUGH watermark
+            await this.advanceWatermark()
+
+            // Step 8: Stop heartbeat + release locks
+            heartbeat.stop()
+            await releaseLocks(this.client, this.tableName, lockKeys, batchId)
+        } catch (error) {
+            // Cleanup on any error
+            heartbeat?.stop()
+            await this.markBatchFailed(batchId)
+            await releaseLocks(this.client, this.tableName, lockKeys, batchId)
+            throw error
+        }
+    }
+
+    private computeLockKeys(condition: AppendCondition, events: DcbEvent[]): string[] {
+        const keys = new Set<string>()
+
+        // From condition query items: cartesian product of types × tags
+        for (const item of condition.failIfEventsMatch.items) {
+            for (const type of item.types ?? []) {
+                for (const tag of item.tags?.values ?? []) {
+                    keys.add(`${type}:${tag}`)
+                }
+            }
+        }
+
+        // From events: cartesian product of event type × event tags
+        for (const event of events) {
+            for (const tag of event.tags.values) {
+                keys.add(`${event.type}:${tag}`)
+            }
+        }
+
+        return [...keys].sort()
+    }
+
+    private async checkCondition(condition: AppendCondition): Promise<void> {
+        const afterPos = padSeqPos(condition.after.value)
+
+        const checks = condition.failIfEventsMatch.items.flatMap(item =>
+            (item.types ?? []).flatMap(type =>
+                (item.tags?.values ?? []).map(tag => ({ type, tag }))
+            )
+        )
+
+        const results = await Promise.all(
+            checks.map(async ({ type, tag }) => {
+                const result = await this.client.send(
+                    new QueryCommand({
+                        TableName: this.tableName,
+                        KeyConditionExpression: "PK = :pk AND SK > :pos",
+                        ExpressionAttributeValues: {
+                            ":pk": `I#${type}#${tag}`,
+                            ":pos": afterPos
+                        },
+                        ConsistentRead: true,
+                        Limit: 1
+                    })
+                )
+                return (result.Items?.length ?? 0) > 0
+            })
+        )
+
+        if (results.some(found => found)) {
+            throw new AppendConditionError(condition)
+        }
+    }
+
+    private async createBatchRecord(batchId: string): Promise<void> {
+        await this.client.send(
+            new PutCommand({
+                TableName: this.tableName,
+                Item: {
+                    PK: `_BATCH#${batchId}`,
+                    SK: `_BATCH#${batchId}`,
+                    status: "PENDING",
+                    createdAt: Date.now()
+                }
+            })
+        )
+    }
+
+    private async commitBatch(batchId: string): Promise<void> {
+        try {
+            await this.client.send(
+                new UpdateCommand({
+                    TableName: this.tableName,
+                    Key: { PK: `_BATCH#${batchId}`, SK: `_BATCH#${batchId}` },
+                    UpdateExpression: "SET #s = :committed",
+                    ConditionExpression: "#s = :pending",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: { ":committed": "COMMITTED", ":pending": "PENDING" }
+                })
+            )
+        } catch (e: unknown) {
+            if ((e as { name?: string }).name === "ConditionalCheckFailedException") {
+                throw new Error("Batch commit failed: batch was marked FAILED (fencing)")
+            }
+            throw e
+        }
+    }
+
+    private async advanceWatermark(): Promise<void> {
+        // Scan for PENDING batches to find the lowest seqStart
+        const pendingBatches: number[] = []
+        let lastKey: Record<string, unknown> | undefined
+
+        do {
+            const result = await this.client.send(
+                new ScanCommand({
+                    TableName: this.tableName,
+                    FilterExpression: "begins_with(PK, :prefix) AND #s = :pending",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: { ":prefix": "_BATCH#", ":pending": "PENDING" },
+                    ProjectionExpression: "seqStart",
+                    ExclusiveStartKey: lastKey
+                })
+            )
+
+            for (const item of result.Items ?? []) {
+                if (item.seqStart !== undefined) {
+                    pendingBatches.push(item.seqStart as number)
+                }
+            }
+
+            lastKey = result.LastEvaluatedKey as Record<string, unknown> | undefined
+        } while (lastKey)
+
+        let newWatermark: number
+        if (pendingBatches.length === 0) {
+            // No PENDING batches — safe to advance to current _SEQ
+            const seqResult = await this.client.send(
+                new GetCommand({
+                    TableName: this.tableName,
+                    Key: { PK: "_SEQ", SK: "_SEQ" },
+                    ConsistentRead: true
+                })
+            )
+            newWatermark = (seqResult.Item?.value as number) ?? 0
+        } else {
+            // PENDING batches exist — watermark is min(seqStart) - 1
+            newWatermark = Math.min(...pendingBatches) - 1
+        }
+
+        if (newWatermark <= 0) return
+
+        // Conditional advance — can only move forward
+        try {
+            await this.client.send(
+                new UpdateCommand({
+                    TableName: this.tableName,
+                    Key: { PK: "_COMMITTED_THROUGH", SK: "_COMMITTED_THROUGH" },
+                    UpdateExpression: "SET #val = :new",
+                    ConditionExpression: "attribute_not_exists(#val) OR #val < :new",
+                    ExpressionAttributeNames: { "#val": "value" },
+                    ExpressionAttributeValues: { ":new": newWatermark }
+                })
+            )
+        } catch (e: unknown) {
+            if ((e as { name?: string }).name !== "ConditionalCheckFailedException") throw e
+            // Another committer already advanced further — fine
+        }
+    }
+
+    private async markBatchFailed(batchId: string): Promise<void> {
+        try {
+            await this.client.send(
+                new UpdateCommand({
+                    TableName: this.tableName,
+                    Key: { PK: `_BATCH#${batchId}`, SK: `_BATCH#${batchId}` },
+                    UpdateExpression: "SET #s = :failed",
+                    ConditionExpression: "#s = :pending",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: { ":failed": "FAILED", ":pending": "PENDING" }
+                })
+            )
+        } catch {
+            // Already COMMITTED or FAILED — fine
+        }
     }
 
     async *read(query: Query, options?: ReadOptions): AsyncGenerator<SequencedEvent> {
