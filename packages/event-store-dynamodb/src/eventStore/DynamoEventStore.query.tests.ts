@@ -1,5 +1,5 @@
-import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb"
-import { DcbEvent, Query, streamAllEventsToArray, Tags } from "@dcb-es/event-store"
+import { DynamoDBDocumentClient, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb"
+import { AppendCondition, DcbEvent, Query, SequencePosition, streamAllEventsToArray, Tags } from "@dcb-es/event-store"
 import { DynamoEventStore } from "./DynamoEventStore"
 import { getTestDynamoTable } from "@test/testDynamoClient"
 
@@ -185,6 +185,87 @@ describe("DynamoEventStore.read", () => {
             const positions = events.map(e => e.position.value)
             const uniquePositions = new Set(positions)
             expect(positions.length).toBe(uniquePositions.size)
+        })
+    })
+
+    describe("batch visibility filtering", () => {
+        test("COMMITTED batch events should be visible", async () => {
+            const { client: c, tableName: tn } = await getTestDynamoTable()
+            const store = new DynamoEventStore(c, tn)
+            const tags = Tags.from(["entity=vis1"])
+
+            // Append with condition → creates a committed batch
+            const condition: AppendCondition = {
+                failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags }]),
+                after: SequencePosition.zero()
+            }
+            await store.append(new EventType1(tags), condition)
+
+            const events = await streamAllEventsToArray(store.read(Query.all()))
+            expect(events.length).toBe(1)
+        })
+
+        test("PENDING batch events should be invisible", async () => {
+            const { client: c, tableName: tn } = await getTestDynamoTable()
+            const store = new DynamoEventStore(c, tn)
+
+            // Append unconditional event (no batchId — always visible)
+            await store.append(new EventType1(Tags.from(["entity=vis2"])))
+
+            // Manually write an event with a PENDING batchId
+            const batchId = crypto.randomUUID()
+            await c.send(new PutCommand({
+                TableName: tn,
+                Item: { PK: `_BATCH#${batchId}`, SK: `_BATCH#${batchId}`, status: "PENDING", createdAt: Date.now() }
+            }))
+            await c.send(new PutCommand({
+                TableName: tn,
+                Item: { PK: "E#2", SK: "E", type: "testEvent1", tags: ["entity=vis2"], data: {}, metadata: {}, timestamp: new Date().toISOString(), seqPos: 2, batchId }
+            }))
+            await c.send(new PutCommand({
+                TableName: tn,
+                Item: { PK: "A#0", SK: "0000000000000002", seqPos: 2 }
+            }))
+
+            const events = await streamAllEventsToArray(store.read(Query.all()))
+            expect(events.length).toBe(1) // Only the unconditional event
+        })
+
+        test("FAILED batch events should be invisible", async () => {
+            const { client: c, tableName: tn } = await getTestDynamoTable()
+            const store = new DynamoEventStore(c, tn)
+
+            await store.append(new EventType1(Tags.from(["entity=vis3"])))
+
+            // Manually write an event with a FAILED batchId
+            const batchId = crypto.randomUUID()
+            await c.send(new PutCommand({
+                TableName: tn,
+                Item: { PK: `_BATCH#${batchId}`, SK: `_BATCH#${batchId}`, status: "FAILED", createdAt: Date.now() }
+            }))
+            await c.send(new PutCommand({
+                TableName: tn,
+                Item: { PK: "E#2", SK: "E", type: "testEvent1", tags: ["entity=vis3"], data: {}, metadata: {}, timestamp: new Date().toISOString(), seqPos: 2, batchId }
+            }))
+            await c.send(new PutCommand({
+                TableName: tn,
+                Item: { PK: "A#0", SK: "0000000000000002", seqPos: 2 }
+            }))
+
+            const events = await streamAllEventsToArray(store.read(Query.all()))
+            expect(events.length).toBe(1)
+        })
+
+        test("events without batchId should always be visible", async () => {
+            const { client: c, tableName: tn } = await getTestDynamoTable()
+            const store = new DynamoEventStore(c, tn)
+
+            await store.append(new EventType1(Tags.from(["entity=vis4"])))
+            await store.append(new EventType2(Tags.from(["entity=vis4"])))
+
+            const events = await streamAllEventsToArray(store.read(Query.all()))
+            expect(events.length).toBe(2)
+            // Both should have no batchId and be fully visible
         })
     })
 })
