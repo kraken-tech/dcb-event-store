@@ -415,11 +415,12 @@ All indexes are denormalized items in the main table. This is critical because *
 | Item type | PK | SK | Data |
 |-----------|----|----|------|
 | Event (primary) | `E#<seqPos>` | `E` | Full event: type, tags, data, metadata, timestamp, batchId? |
-| Type+Tag index | `I#<eventType>#<tagValue>` | `<seqPos>` | Full event data |
-| Type-only index | `IT#<eventType>` | `<seqPos>` | Full event data |
-| Tag-only index | `IG#<tagValue>` | `<seqPos>` | Full event data |
-| All-events bucket | `A#<bucket>` | `<seqPos>` | Full event data |
+| Type+Tag pointer | `I#<eventType>#<tagValue>` | `<seqPos>` | `seqPos` only (pointer to `E#` item) |
+| Type-only pointer | `IT#<eventType>` | `<seqPos>` | `seqPos` only |
+| Tag-only pointer | `IG#<tagValue>` | `<seqPos>` | `seqPos` only |
+| All-events pointer | `A#<bucket>` | `<seqPos>` | `seqPos` only |
 | Sequence counter | `_SEQ` | `_SEQ` | `value` (Number) |
+| Committed watermark | `_COMMITTED_THROUGH` | `_COMMITTED_THROUGH` | `value` (Number) |
 | Batch record | `_BATCH#<uuid>` | `_BATCH#<uuid>` | `status`, `seqStart`, `seqEnd`, `createdAt` |
 | Lock | `_LOCK#<key>` | `_LOCK#<key>` | `batchId`, `leaseExpiry` (epoch ms) |
 
@@ -427,13 +428,12 @@ Key design notes:
 
 - `<seqPos>` is zero-padded (e.g. `00000000501`) for correct lexicographic sort order. 16 digits supports up to 9,999,999,999,999,999 events.
 - `<bucket>` = `floor(seqPos / 10000)` — each bucket partition holds up to 10,000 events
-- Full event data is stored on every index item — no secondary lookups on read (see rationale below)
+- Event data is stored **once** in the `E#` item — index items are lightweight pointers (~50 bytes each)
 - `IT#` and `IG#` indexes support type-only and tag-only **reads** only (not used for append condition checks or locks)
 - `I#` is the critical index — used for both reads AND the strongly consistent condition check inside locks
+- The condition check only needs to know whether a matching pointer EXISTS above a position — it doesn't need event data
 
 ### Index Roles
-
-The three read indexes serve different purposes and have different consistency characteristics:
 
 | Index | Used for | Consistency | Required by |
 |-------|----------|-------------|-------------|
@@ -444,23 +444,26 @@ The three read indexes serve different purposes and have different consistency c
 
 Because append conditions always specify both types and tags (adapter constraint), the condition check only ever queries `I#` items. The `IT#`, `IG#`, and `A#` indexes exist purely for read flexibility — projections, read models, and ad-hoc queries that don't need the full type+tag combination.
 
-### Why Full Data on Every Index Item
+### Pointer Index Pattern (AWS Adjacency List)
 
-The alternative is pointer-only indexes: store just the `seqPos` on index items, then `BatchGetItem` the primary `E#` items to get full event data. This halves write volume but doubles read latency:
+This follows the [AWS-recommended adjacency list pattern](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-adjacency-graphs.html) for many-to-many relationships. DynamoDB has no equivalent of Postgres's GIN indexes for array-element lookups, so the standard approach is inverted index pointers.
 
-| Approach | Write items per event (2 tags) | Read round trips | Read latency |
-|----------|-------------------------------|-------------------|-------------|
-| Full data on indexes | 7 | 1 query | 1-5ms |
-| Pointer indexes + BatchGetItem | 7 (smaller items) | 1 query + 1 BatchGetItem | 5-15ms |
+Event data is stored **once** in the `E#` item. All other items (`I#`, `IT#`, `IG#`, `A#`) are lightweight pointers containing only `PK`, `SK`, and `seqPos`. Reads query the pointer partition, then `BatchGetItem` the `E#` items for full event data.
 
-The full-data approach wins for reads because:
+| Aspect | Pointer indexes (implemented) | Full-data indexes (alternative) |
+|--------|------------------------------|-------------------------------|
+| Event data copies | **1** | 2×tags+3 |
+| Index item size | ~50 bytes | ~1KB+ |
+| Data consistency | **Single source of truth** | Duplicated data could diverge |
+| Read latency | 1 query + 1 BatchGetItem (~8ms) | 1 query (~3ms) |
+| Write volume | Low | High |
+| Condition check | 1 query on pointer (existence check only) | Same |
 
-- **Decision model reads** (the hot path) complete in a single DynamoDB Query call — no secondary lookup
-- **The condition check inside locks** is a single strongly consistent Query — adding a BatchGetItem step would increase lock hold time and contention window
-- DynamoDB storage is cheap ($0.25/GB/month) — the duplication cost is negligible
-- `BatchGetItem` is limited to 100 items per call, adding pagination complexity for larger reads
-
-Trade-off: each event's data payload is stored `2 * tags + 3` times. For events with very large `data` fields (approaching DynamoDB's 400KB item limit), this amplifies storage cost. Events should keep their `data` payload lean — store references to large blobs (S3 keys, etc.) rather than embedding them.
+The pointer approach was chosen because:
+- **Single source of truth** — event data exists in exactly one place, eliminating data consistency risk
+- **Lower write amplification** — pointer items are ~50 bytes vs ~1KB+ for full event data
+- **Condition checks don't need event data** — they only check pointer existence above a position
+- **Read latency trade-off is acceptable** — the extra `BatchGetItem` adds ~3-5ms for typical queries returning 5-50 events
 
 ### Write Amplification
 
@@ -468,48 +471,54 @@ For a `StudentEnrolled` event with tags `[course=CS101, student=STU42]`:
 
 ```
 PK                                    | SK               | Purpose
-E#501                                 | E                | Primary record (source of truth)
-I#StudentEnrolled#course=CS101        | 00000000501      | Type+tag index (condition checks + reads)
-I#StudentEnrolled#student=STU42       | 00000000501      | Type+tag index (condition checks + reads)
-IT#StudentEnrolled                    | 00000000501      | Type-only read index
-IG#course=CS101                       | 00000000501      | Tag-only read index
-IG#student=STU42                      | 00000000501      | Tag-only read index
-A#0                                   | 00000000501      | All-events bucket
+E#501                                 | E                | Primary record (full event data)
+I#StudentEnrolled#course=CS101        | 00000000501      | Type+tag pointer (condition checks + reads)
+I#StudentEnrolled#student=STU42       | 00000000501      | Type+tag pointer (condition checks + reads)
+IT#StudentEnrolled                    | 00000000501      | Type-only read pointer
+IG#course=CS101                       | 00000000501      | Tag-only read pointer
+IG#student=STU42                      | 00000000501      | Tag-only read pointer
+A#0                                   | 00000000501      | All-events bucket pointer
 ```
 
-**7 items per event** (with 2 tags). Formula: `1 + tags + 1 + tags + 1 = 2 * tags + 3`.
+**7 items per event** (with 2 tags). Formula: `1 + tags + 1 + tags + 1 = 2 * tags + 3`. Only the `E#` item carries full event data (~1KB). The 6 pointer items are ~50 bytes each (~300 bytes total).
 
-| Tags per event | Items written | BatchWriteItem calls per event |
+| Tags per event | Items written | Total write volume (1KB event) |
 |----------------|--------------|-------------------------------|
-| 1 | 5 | 1 (fits in single call) |
-| 2 | 7 | 1 |
-| 3 | 9 | 1 |
-| 5 | 13 | 1 |
-| 10 | 23 | 1 |
+| 1 | 5 | ~1.2KB |
+| 2 | 7 | ~1.3KB |
+| 3 | 9 | ~1.4KB |
+| 5 | 13 | ~1.6KB |
+| 10 | 23 | ~2.1KB |
 
-For a batch of 1,000 events with 3 tags average: 9,000 items = 360 BatchWriteItem calls. Running in parallel at ~5ms each from a single Fargate task, this completes in well under a second.
-
-All index items for a single event should be written in the **same BatchWriteItem call** where possible (up to 25 items per call). This ensures index items appear together — a reader won't see an `I#` item without the corresponding `IT#` and `IG#` items for the same event.
+For a batch of 1,000 events with 3 tags average: 9,000 items (~1.4MB total) = 360 BatchWriteItem calls. Running in parallel at ~5ms each from a single Fargate task, this completes in well under a second.
 
 ### Event Item Schema
 
-Every index item stores the same event attributes. The shared schema:
+The `E#` (primary) item stores the full event:
 
 ```typescript
 {
-  PK: string,                // Partition key (varies by item type)
-  SK: string,                // Sort key (seqPos, zero-padded)
+  PK: string,                // "E#<seqPos>"
+  SK: "E",
   type: string,              // Event type (e.g. "StudentEnrolled")
-  tags: string[],            // All tags as StringSet (e.g. ["course=CS101", "student=STU42"])
-  data: Record<string, any>, // Event payload (Map)
-  metadata: Record<string, any>, // Event metadata (Map)
+  tags: string[],            // All tags (e.g. ["course=CS101", "student=STU42"])
+  data: Record<string, any>, // Event payload
+  metadata: Record<string, any>,
   timestamp: string,         // ISO 8601 UTC
-  seqPos: number,            // Numeric sequence position (for arithmetic, not just sort order)
-  batchId?: string           // Present only for events from large batch appends
+  seqPos: number,            // Numeric sequence position
+  batchId?: string           // Present only for events from conditional appends
 }
 ```
 
-The `seqPos` attribute is stored as a Number in addition to being encoded in the SK. The SK is for sort order; the numeric attribute is for returning in the `EventEnvelope` and for arithmetic comparisons in application code.
+Pointer items (`I#`, `IT#`, `IG#`, `A#`) store only:
+
+```typescript
+{
+  PK: string,                // Varies by index type
+  SK: string,                // Zero-padded seqPos
+  seqPos: number             // For constructing E# key on BatchGetItem
+}
+```
 
 ### Query Routing
 
