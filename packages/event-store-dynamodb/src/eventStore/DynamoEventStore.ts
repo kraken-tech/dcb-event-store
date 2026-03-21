@@ -8,7 +8,7 @@ import {
     EventStore,
     DcbEvent,
     AppendCondition,
-    EventEnvelope,
+    SequencedEvent,
     ReadOptions,
     Query
 } from "@dcb-es/event-store"
@@ -29,12 +29,12 @@ export class DynamoEventStore implements EventStore {
         await this.initSequenceCounter()
     }
 
-    async append(events: DcbEvent | DcbEvent[], appendCondition?: AppendCondition): Promise<void> {
+    async append(events: DcbEvent | DcbEvent[], condition?: AppendCondition): Promise<void> {
         const eventArray = Array.isArray(events) ? events : [events]
 
-        if (appendCondition) {
-            this.validateAppendCondition(appendCondition)
-            // TODO: implement condition check (chunk 2)
+        if (condition) {
+            this.validateAppendCondition(condition)
+            // TODO: implement lock-based conditional append (#44)
             throw new Error("Append conditions not yet implemented")
         }
 
@@ -49,7 +49,7 @@ export class DynamoEventStore implements EventStore {
         await this.batchWriteItems(allItems)
     }
 
-    async *read(query: Query, options?: ReadOptions): AsyncGenerator<EventEnvelope> {
+    async *read(query: Query, options?: ReadOptions): AsyncGenerator<SequencedEvent> {
         yield* readFromDynamo(this.client, this.tableName, query, options)
     }
 
@@ -96,12 +96,12 @@ export class DynamoEventStore implements EventStore {
 
                 let retries = 0
                 while (unprocessed?.[this.tableName]?.length && retries < MAX_BATCH_WRITE_RETRIES) {
+                    retries++
                     await new Promise(resolve => setTimeout(resolve, Math.min(100 * 2 ** retries, 5000)))
                     const result = await this.client.send(
                         new BatchWriteCommand({ RequestItems: unprocessed as Record<string, any> })
                     )
                     unprocessed = result.UnprocessedItems
-                    retries++
                 }
 
                 if (unprocessed?.[this.tableName]?.length) {
@@ -112,15 +112,15 @@ export class DynamoEventStore implements EventStore {
     }
 
     private validateAppendCondition(condition: AppendCondition): void {
-        if (condition.query.isAll) {
+        if (condition.failIfEventsMatch.isAll) {
             throw new Error(
                 "DynamoDB adapter does not support Query.all() in append conditions. Use specific event types and tags."
             )
         }
 
-        for (const item of condition.query.items) {
-            if (!item.eventTypes || item.eventTypes.length === 0) {
-                throw new Error("DynamoDB adapter requires eventTypes in every append condition QueryItem")
+        for (const item of condition.failIfEventsMatch.items) {
+            if (!item.types || item.types.length === 0) {
+                throw new Error("DynamoDB adapter requires types in every append condition QueryItem")
             }
             if (!item.tags || item.tags.length === 0) {
                 throw new Error("DynamoDB adapter requires tags in every append condition QueryItem")

@@ -48,7 +48,7 @@ describe("DynamoEventStore.append", () => {
             await eventStore.append(new EventType1())
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
             expect(events.length).toBe(1)
-            expect(events[0].sequencePosition.value).toBeGreaterThan(0)
+            expect(events[0].position.value).toBeGreaterThan(0)
         })
 
         test("should store and return metadata on event successfully", async () => {
@@ -66,31 +66,31 @@ describe("DynamoEventStore.append", () => {
         })
 
         test("should reject Query.all() in append conditions", async () => {
-            const appendCondition: AppendCondition = {
-                query: Query.all(),
-                expectedCeiling: SequencePosition.zero()
+            const condition: AppendCondition = {
+                failIfEventsMatch: Query.all(),
+                after: SequencePosition.zero()
             }
-            await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
+            await expect(eventStore.append(new EventType1(), condition)).rejects.toThrow(
                 "DynamoDB adapter does not support Query.all() in append conditions"
             )
         })
 
-        test("should reject append condition with missing eventTypes", async () => {
-            const appendCondition: AppendCondition = {
-                query: Query.fromItems([{ tags: Tags.from(["some=tag"]) }]),
-                expectedCeiling: SequencePosition.zero()
+        test("should reject append condition with missing types", async () => {
+            const condition: AppendCondition = {
+                failIfEventsMatch: Query.fromItems([{ tags: Tags.from(["some=tag"]) }]),
+                after: SequencePosition.zero()
             }
-            await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
-                "DynamoDB adapter requires eventTypes"
+            await expect(eventStore.append(new EventType1(), condition)).rejects.toThrow(
+                "DynamoDB adapter requires types"
             )
         })
 
         test("should reject append condition with missing tags", async () => {
-            const appendCondition: AppendCondition = {
-                query: Query.fromItems([{ eventTypes: ["testEvent1"] }]),
-                expectedCeiling: SequencePosition.zero()
+            const condition: AppendCondition = {
+                failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"] }]),
+                after: SequencePosition.zero()
             }
-            await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
+            await expect(eventStore.append(new EventType1(), condition)).rejects.toThrow(
                 "DynamoDB adapter requires tags"
             )
         })
@@ -112,7 +112,7 @@ describe("DynamoEventStore.append", () => {
 
         test("should assign increasing sequence positions", async () => {
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
-            expect(events[1].sequencePosition.value).toBeGreaterThan(events[0].sequencePosition.value)
+            expect(events[1].position.value).toBeGreaterThan(events[0].position.value)
         })
 
         test("should append multiple events in a single call", async () => {

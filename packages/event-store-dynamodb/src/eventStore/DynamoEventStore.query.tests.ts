@@ -1,3 +1,4 @@
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb"
 import { DcbEvent, Query, streamAllEventsToArray, Tags } from "@dcb-es/event-store"
 import { DynamoEventStore } from "./DynamoEventStore"
 import { getTestDynamoTable } from "@test/testDynamoClient"
@@ -39,7 +40,6 @@ describe("DynamoEventStore.read", () => {
         tableName = testTable.tableName
         eventStore = new DynamoEventStore(client, tableName)
 
-        // Seed test data
         const tag1 = Tags.from(["testTagKey=ev-1"])
         const tag2 = Tags.from(["testTagKey=ev-2"])
         const multiTag = Tags.from(["testTagKey=ev-1", "otherTag=shared"])
@@ -60,7 +60,7 @@ describe("DynamoEventStore.read", () => {
         test("should return events in sequence order", async () => {
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
             for (let i = 1; i < events.length; i++) {
-                expect(events[i].sequencePosition.value).toBeGreaterThan(events[i - 1].sequencePosition.value)
+                expect(events[i].position.value).toBeGreaterThan(events[i - 1].position.value)
             }
         })
 
@@ -68,7 +68,7 @@ describe("DynamoEventStore.read", () => {
             const events = await streamAllEventsToArray(eventStore.read(Query.all(), { backwards: true }))
             expect(events.length).toBe(5)
             for (let i = 1; i < events.length; i++) {
-                expect(events[i].sequencePosition.value).toBeLessThan(events[i - 1].sequencePosition.value)
+                expect(events[i].position.value).toBeLessThan(events[i - 1].position.value)
             }
         })
 
@@ -77,24 +77,24 @@ describe("DynamoEventStore.read", () => {
             expect(events.length).toBe(2)
         })
 
-        test("should return events from a sequence position", async () => {
+        test("should return events from a position", async () => {
             const allEvents = await streamAllEventsToArray(eventStore.read(Query.all()))
-            const fromPos = allEvents[1].sequencePosition
+            const fromPos = allEvents[1].position
 
-            const events = await streamAllEventsToArray(eventStore.read(Query.all(), { fromSequencePosition: fromPos }))
+            const events = await streamAllEventsToArray(eventStore.read(Query.all(), { fromPosition: fromPos }))
             expect(events.length).toBe(4)
-            expect(events[0].sequencePosition.value).toBe(fromPos.value)
+            expect(events[0].position.value).toBe(fromPos.value)
         })
 
-        test("should return events backwards from a sequence position", async () => {
+        test("should return events backwards from a position", async () => {
             const allEvents = await streamAllEventsToArray(eventStore.read(Query.all()))
-            const fromPos = allEvents[2].sequencePosition
+            const fromPos = allEvents[2].position
 
             const events = await streamAllEventsToArray(
-                eventStore.read(Query.all(), { fromSequencePosition: fromPos, backwards: true })
+                eventStore.read(Query.all(), { fromPosition: fromPos, backwards: true })
             )
             expect(events.length).toBe(3)
-            expect(events[0].sequencePosition.value).toBe(fromPos.value)
+            expect(events[0].position.value).toBe(fromPos.value)
         })
 
         test("should return events backwards with limit", async () => {
@@ -106,7 +106,7 @@ describe("DynamoEventStore.read", () => {
     describe("query by event types", () => {
         test("should return events matching a single type", async () => {
             const events = await streamAllEventsToArray(
-                eventStore.read(Query.fromItems([{ eventTypes: ["testEvent1"] }]))
+                eventStore.read(Query.fromItems([{ types: ["testEvent1"] }]))
             )
             expect(events.every(e => e.event.type === "testEvent1")).toBe(true)
             expect(events.length).toBe(3)
@@ -114,7 +114,7 @@ describe("DynamoEventStore.read", () => {
 
         test("should return events matching multiple types", async () => {
             const events = await streamAllEventsToArray(
-                eventStore.read(Query.fromItems([{ eventTypes: ["testEvent1", "testEvent2"] }]))
+                eventStore.read(Query.fromItems([{ types: ["testEvent1", "testEvent2"] }]))
             )
             expect(events.length).toBe(5)
         })
@@ -140,7 +140,7 @@ describe("DynamoEventStore.read", () => {
     describe("query by types + tags", () => {
         test("should return events matching type AND tag", async () => {
             const events = await streamAllEventsToArray(
-                eventStore.read(Query.fromItems([{ eventTypes: ["testEvent1"], tags: Tags.from(["testTagKey=ev-1"]) }]))
+                eventStore.read(Query.fromItems([{ types: ["testEvent1"], tags: Tags.from(["testTagKey=ev-1"]) }]))
             )
             expect(events.length).toBe(2)
             expect(events.every(e => e.event.type === "testEvent1")).toBe(true)
@@ -151,7 +151,7 @@ describe("DynamoEventStore.read", () => {
             const events = await streamAllEventsToArray(
                 eventStore.read(
                     Query.fromItems([{
-                        eventTypes: ["testEvent1"],
+                        types: ["testEvent1"],
                         tags: Tags.from(["testTagKey=ev-1", "otherTag=shared"])
                     }])
                 )
@@ -168,8 +168,8 @@ describe("DynamoEventStore.read", () => {
             const events = await streamAllEventsToArray(
                 eventStore.read(
                     Query.fromItems([
-                        { eventTypes: ["testEvent1"], tags: Tags.from(["testTagKey=ev-1"]) },
-                        { eventTypes: ["testEvent2"], tags: Tags.from(["testTagKey=ev-2"]) }
+                        { types: ["testEvent1"], tags: Tags.from(["testTagKey=ev-1"]) },
+                        { types: ["testEvent2"], tags: Tags.from(["testTagKey=ev-2"]) }
                     ])
                 )
             )
@@ -179,10 +179,10 @@ describe("DynamoEventStore.read", () => {
         test("should deduplicate events matching multiple query items", async () => {
             const events = await streamAllEventsToArray(
                 eventStore.read(
-                    Query.fromItems([{ eventTypes: ["testEvent1"] }, { tags: Tags.from(["testTagKey=ev-1"]) }])
+                    Query.fromItems([{ types: ["testEvent1"] }, { tags: Tags.from(["testTagKey=ev-1"]) }])
                 )
             )
-            const positions = events.map(e => e.sequencePosition.value)
+            const positions = events.map(e => e.position.value)
             const uniquePositions = new Set(positions)
             expect(positions.length).toBe(uniquePositions.size)
         })

@@ -1,6 +1,7 @@
-import { Tags, DcbEvent, EventEnvelope, SequencePosition, Timestamp } from "@dcb-es/event-store"
+import { Tags, DcbEvent, SequencedEvent, SequencePosition, Timestamp } from "@dcb-es/event-store"
 
 const SEQ_PAD_LENGTH = 16
+export const BUCKET_SIZE = 10_000
 
 export const padSeqPos = (pos: number): string => pos.toString().padStart(SEQ_PAD_LENGTH, "0")
 
@@ -27,8 +28,8 @@ export type DynamoWriteBatch = {
     pointers: DynamoPointerItem[]
 }
 
-export const toEventEnvelope = (item: DynamoEventItem): EventEnvelope => ({
-    sequencePosition: SequencePosition.create(item.seqPos),
+export const toSequencedEvent = (item: DynamoEventItem): SequencedEvent => ({
+    position: SequencePosition.create(item.seqPos),
     timestamp: Timestamp.create(item.timestamp),
     event: {
         type: item.type,
@@ -37,6 +38,12 @@ export const toEventEnvelope = (item: DynamoEventItem): EventEnvelope => ({
         tags: Tags.from(item.tags)
     }
 })
+
+export const validateKeyComponent = (value: string, label: string): void => {
+    if (value.includes("#")) {
+        throw new Error(`${label} must not contain '#' (reserved as DynamoDB key delimiter): "${value}"`)
+    }
+}
 
 export function chunk<T>(array: T[], size: number): T[][] {
     const chunks: T[][] = []
@@ -47,6 +54,11 @@ export function chunk<T>(array: T[], size: number): T[][] {
 }
 
 export const buildWriteBatch = (event: DcbEvent, seqPos: number, batchId?: string): DynamoWriteBatch => {
+    validateKeyComponent(event.type, "Event type")
+    for (const tag of event.tags.values) {
+        validateKeyComponent(tag, "Tag")
+    }
+
     const timestamp = new Date().toISOString()
     const sk = padSeqPos(seqPos)
     const tags = [...event.tags.values]
@@ -65,7 +77,7 @@ export const buildWriteBatch = (event: DcbEvent, seqPos: number, batchId?: strin
 
     const pointers: DynamoPointerItem[] = [
         { PK: `IT#${event.type}`, SK: sk, seqPos },
-        { PK: `A#${Math.floor(seqPos / 10000)}`, SK: sk, seqPos }
+        { PK: `A#${Math.floor(seqPos / BUCKET_SIZE)}`, SK: sk, seqPos }
     ]
 
     for (const tag of tags) {

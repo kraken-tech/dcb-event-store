@@ -4,15 +4,15 @@ import {
     BatchGetCommand,
     GetCommand
 } from "@aws-sdk/lib-dynamodb"
-import { EventEnvelope, ReadOptions, Query, QueryItem, Tags, SequencePosition } from "@dcb-es/event-store"
-import { toEventEnvelope, padSeqPos, DynamoEventItem, chunk } from "./utils"
+import { SequencedEvent, ReadOptions, Query, QueryItem, Tags, SequencePosition } from "@dcb-es/event-store"
+import { toSequencedEvent, padSeqPos, DynamoEventItem, chunk, BUCKET_SIZE } from "./utils"
 
 export async function* readFromDynamo(
     client: DynamoDBDocumentClient,
     tableName: string,
     query: Query,
     options?: ReadOptions
-): AsyncGenerator<EventEnvelope> {
+): AsyncGenerator<SequencedEvent> {
     const reader = createReader(client, tableName)
 
     const seqPositions = query.isAll
@@ -26,13 +26,13 @@ export async function* readFromDynamo(
         // BatchGetItem returns items in arbitrary order — re-sort each batch
         const events = await reader.batchGetEvents(batch)
         const ordered = events.sort((a, b) => {
-            const diff = a.sequencePosition.value - b.sequencePosition.value
+            const diff = a.position.value - b.position.value
             return options?.backwards ? -diff : diff
         })
 
-        for (const envelope of ordered) {
+        for (const event of ordered) {
             if (options?.limit && count >= options.limit) return
-            yield envelope
+            yield event
             count++
         }
     }
@@ -41,14 +41,14 @@ export async function* readFromDynamo(
 function createReader(client: DynamoDBDocumentClient, tableName: string) {
     async function queryPartition(
         pk: string,
-        fromSequencePosition?: SequencePosition,
+        fromPosition?: SequencePosition,
         backwards?: boolean
     ): Promise<Record<string, unknown>[]> {
         const expressionValues: Record<string, unknown> = { ":pk": pk }
         let keyCondition = "PK = :pk"
 
-        if (fromSequencePosition) {
-            const padded = padSeqPos(fromSequencePosition.value)
+        if (fromPosition) {
+            const padded = padSeqPos(fromPosition.value)
             keyCondition += backwards ? " AND SK <= :fromPos" : " AND SK >= :fromPos"
             expressionValues[":fromPos"] = padded
         }
@@ -77,13 +77,12 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
         return allItems
     }
 
-    async function batchGetEvents(seqPositions: number[]): Promise<EventEnvelope[]> {
+    async function batchGetEvents(seqPositions: number[]): Promise<SequencedEvent[]> {
         if (seqPositions.length === 0) return []
 
-        const unique = [...new Set(seqPositions)]
-        const envelopes: EventEnvelope[] = []
+        const envelopes: SequencedEvent[] = []
 
-        for (const batch of chunk(unique, 100)) {
+        for (const batch of chunk(seqPositions, 100)) {
             const keys = batch.map(pos => ({ PK: `E#${pos}`, SK: "E" }))
 
             const result = await client.send(
@@ -95,7 +94,7 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
             )
 
             for (const item of result.Responses?.[tableName] ?? []) {
-                envelopes.push(toEventEnvelope(item as DynamoEventItem))
+                envelopes.push(toSequencedEvent(item as DynamoEventItem))
             }
         }
 
@@ -110,14 +109,14 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
                 ConsistentRead: true
             })
         )
-        return Math.floor(((result.Item?.value as number) ?? 0) / 10000)
+        return Math.floor(((result.Item?.value as number) ?? 0) / BUCKET_SIZE)
     }
 
     async function collectFromBuckets(options?: ReadOptions): Promise<number[]> {
-        const fromSeq = options?.fromSequencePosition?.value ?? 0
+        const fromSeq = options?.fromPosition?.value ?? 0
         const startBucket = options?.backwards
             ? await getMaxBucket()
-            : Math.floor(fromSeq / 10000)
+            : Math.floor(fromSeq / BUCKET_SIZE)
 
         const positions: number[] = []
         const bucketStep = options?.backwards ? -1 : 1
@@ -126,7 +125,7 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
         while (bucket >= 0) {
             const items = await queryPartition(
                 `A#${bucket}`,
-                options?.fromSequencePosition,
+                options?.fromPosition,
                 options?.backwards
             )
 
@@ -150,13 +149,13 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
     }
 
     async function collectFromSingleQueryItem(queryItem: QueryItem, options?: ReadOptions): Promise<number[]> {
-        const hasTypes = queryItem.eventTypes && queryItem.eventTypes.length > 0
+        const hasTypes = queryItem.types && queryItem.types.length > 0
         const hasTags = queryItem.tags && queryItem.tags.length > 0
 
         if (hasTypes && hasTags) {
-            return collectByTypeAndTag(queryItem.eventTypes!, queryItem.tags!, options)
+            return collectByTypeAndTag(queryItem.types!, queryItem.tags!, options)
         } else if (hasTypes) {
-            return collectByTypeOnly(queryItem.eventTypes!, options)
+            return collectByTypeOnly(queryItem.types!, options)
         } else if (hasTags) {
             return collectByTagOnly(queryItem.tags!, options)
         }
@@ -165,17 +164,17 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
     }
 
     async function collectByTypeAndTag(
-        eventTypes: string[],
+        types: string[],
         tags: Tags,
         options?: ReadOptions
     ): Promise<number[]> {
         const firstTag = tags.values[0]
 
         const allPositions = await Promise.all(
-            eventTypes.map(async type => {
+            types.map(async type => {
                 const items = await queryPartition(
                     `I#${type}#${firstTag}`,
-                    options?.fromSequencePosition,
+                    options?.fromPosition,
                     options?.backwards
                 )
                 return items.map(item => item.seqPos as number)
@@ -186,23 +185,22 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
             return allPositions.flat()
         }
 
-        // Multi-tag: fetch full events to check remaining tags, cache them
-        // to avoid re-fetching in readFromDynamo's batchGetEvents
+        // Multi-tag: fetch full events to check remaining tags
         const candidatePositions = allPositions.flat()
         const events = await batchGetEvents(candidatePositions)
         const remainingTags = tags.values.slice(1)
 
         return events
             .filter(env => remainingTags.every(tag => env.event.tags.values.includes(tag)))
-            .map(env => env.sequencePosition.value)
+            .map(env => env.position.value)
     }
 
-    async function collectByTypeOnly(eventTypes: string[], options?: ReadOptions): Promise<number[]> {
+    async function collectByTypeOnly(types: string[], options?: ReadOptions): Promise<number[]> {
         const allPositions = await Promise.all(
-            eventTypes.map(async type => {
+            types.map(async type => {
                 const items = await queryPartition(
                     `IT#${type}`,
-                    options?.fromSequencePosition,
+                    options?.fromPosition,
                     options?.backwards
                 )
                 return items.map(item => item.seqPos as number)
@@ -216,7 +214,7 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
 
         const items = await queryPartition(
             `IG#${firstTag}`,
-            options?.fromSequencePosition,
+            options?.fromPosition,
             options?.backwards
         )
 
@@ -231,7 +229,7 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
 
         return events
             .filter(env => remainingTags.every(tag => env.event.tags.values.includes(tag)))
-            .map(env => env.sequencePosition.value)
+            .map(env => env.position.value)
     }
 
     return { collectFromBuckets, collectFromQueryItems, batchGetEvents }
