@@ -7,6 +7,8 @@ import {
 import { SequencedEvent, ReadOptions, Query, QueryItem, Tags, SequencePosition } from "@dcb-es/event-store"
 import { toSequencedEvent, padSeqPos, DynamoEventItem, chunk, BUCKET_SIZE } from "./utils"
 
+const BATCH_GET_SIZE = 100
+
 export async function* readFromDynamo(
     client: DynamoDBDocumentClient,
     tableName: string,
@@ -24,7 +26,7 @@ export async function* readFromDynamo(
     const dedupedPositions = deduplicateAndSort(seqPositions, options?.backwards)
 
     let count = 0
-    for (const batch of chunk(dedupedPositions, 100)) {
+    for (const batch of chunk(dedupedPositions, BATCH_GET_SIZE)) {
         const rawEvents = await reader.batchGetEventsWithItems(batch)
 
         // Filter by batch status
@@ -156,7 +158,7 @@ function createReader(client: DynamoDBDocumentClient, tableName: string) {
 
         const entries: { item: DynamoEventItem; sequenced: SequencedEvent }[] = []
 
-        for (const batch of chunk(seqPositions, 100)) {
+        for (const batch of chunk(seqPositions, BATCH_GET_SIZE)) {
             const keys = batch.map(pos => ({ PK: `E#${pos}`, SK: "E" }))
 
             const result = await client.send(

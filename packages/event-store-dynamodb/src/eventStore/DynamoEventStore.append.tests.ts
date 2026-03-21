@@ -110,6 +110,38 @@ describe("DynamoEventStore.append", () => {
         })
     })
 
+    describe("key component validation", () => {
+        let eventStore: DynamoEventStore
+
+        beforeAll(async () => {
+            eventStore = await createEventStore()
+        })
+
+        test("should reject event type containing '#'", async () => {
+            const event: DcbEvent = {
+                type: "Bad#Type",
+                tags: Tags.from(["valid=tag"]),
+                data: {},
+                metadata: {}
+            }
+            await expect(eventStore.append(event)).rejects.toThrow(
+                "Event type must not contain '#'"
+            )
+        })
+
+        test("should reject tag containing '#'", async () => {
+            const event: DcbEvent = {
+                type: "ValidType",
+                tags: Tags.from(["bad#key=value"]),
+                data: {},
+                metadata: {}
+            }
+            await expect(eventStore.append(event)).rejects.toThrow(
+                "Tag must not contain '#'"
+            )
+        })
+    })
+
     describe("append without condition", () => {
         let eventStore: DynamoEventStore
 

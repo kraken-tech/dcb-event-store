@@ -14,7 +14,7 @@ DynamoDB implementation of the `EventStore` interface from `@dcb-es/event-store`
 This adapter enforces two constraints beyond the base `EventStore` interface. These are specific to the DynamoDB implementation and enable the fine-grained lock system that gives maximum write parallelism.
 
 1. **Every event must have at least one tag.**
-2. **Every `QueryItem` in an `AppendCondition` must have non-empty `eventTypes` AND non-empty `tags`.**
+2. **Every `QueryItem` in an `AppendCondition` must have non-empty `types` AND non-empty `tags`.**
 
 These constraints mean the adapter only needs `(eventType, tagValue)` pair locks — no type-level, tag-level, or global locks. Two writers only conflict if they share an exact (type, tag) pair, giving the finest possible granularity.
 
@@ -26,8 +26,8 @@ If your domain requires a type-level constraint (e.g. "count all CourseCreated e
 
 // Append condition:
 {
-  query: Query.fromItems([{ eventTypes: ["CourseCreated"], tags: Tags.from(["courseIndex=global"]) }]),
-  expectedCeiling: lastObservedPosition
+  failIfEventsMatch: Query.fromItems([{ types: ["CourseCreated"], tags: Tags.from(["courseIndex=global"]) }]),
+  after: lastObservedPosition
 }
 
 // Lock: _LOCK#CourseCreated:courseIndex=global
@@ -40,8 +40,8 @@ If your domain requires a type-level constraint (e.g. "count all CourseCreated e
 ```typescript
 // All valid reads:
 eventStore.read(Query.all())                                                // full catch-up
-eventStore.read(Query.all(), { fromSequencePosition: pos })                 // resume projection
-eventStore.read(Query.fromItems([{ eventTypes: ["CourseCreated"] }]))        // type-only read
+eventStore.read(Query.all(), { fromPosition: pos })                 // resume projection
+eventStore.read(Query.fromItems([{ types: ["CourseCreated"] }]))        // type-only read
 eventStore.read(Query.fromItems([{ tags: Tags.from(["course=CS101"]) }]))   // tag-only read
 
 // Appending without a condition — no constraints, no locks:
@@ -219,7 +219,7 @@ The batch record gates event visibility — readers ignore events from PENDING b
 
 The lock key set is the **union** of keys derived from the append condition's query and the events being written. Both sources generate the same key type: `_LOCK#<eventType>:<tagValue>`.
 
-For a query item `{ eventTypes: [CourseCreated, StudentEnrolled], tags: [course=CS101] }` and events of type `CourseCreated` with tags `[course=CS101, semester=fall]`:
+For a query item `{ types: [CourseCreated, StudentEnrolled], tags: [course=CS101] }` and events of type `CourseCreated` with tags `[course=CS101, semester=fall]`:
 
 ```
 Lock keys:
@@ -238,7 +238,7 @@ Start the heartbeat once all locks are acquired.
 
 ### Step 4: Read + Check Append Condition (Inside Lock)
 
-Using **strongly consistent reads**, query events matching the append condition's query where `sequencePosition` exceeds the last position observed by the caller.
+Using **strongly consistent reads**, query events matching the append condition's query where `position` exceeds the last position observed by the caller.
 
 ```
 If any matching events found → stop heartbeat, release locks, mark batch FAILED, throw AppendConditionError
@@ -353,7 +353,7 @@ This ensures the watermark can only move forward — never backwards. Projection
 ## Read Flow
 
 ```typescript
-read(query: Query, options?: ReadOptions): AsyncGenerator<EventEnvelope>
+read(query: Query, options?: ReadOptions): AsyncGenerator<SequencedEvent>
 ```
 
 1. Query events matching type + tags using denormalized index items in the main table
@@ -362,7 +362,7 @@ read(query: Query, options?: ReadOptions): AsyncGenerator<EventEnvelope>
    - Committed batch IDs are cached in-memory (immutable once committed)
    - Unknown batch IDs: `BatchGetItem` on the `_BATCH#<id>` records
    - PENDING, FAILED, or missing → filter out those events
-4. Yield matching, committed events ordered by `sequencePosition`
+4. Yield matching, committed events ordered by `position`
 
 In practice, most reads from normal command handling encounter zero `batchId` events and need no extra lookups.
 
@@ -537,7 +537,7 @@ Pointer items (`I#`, `IT#`, `IG#`, `A#`) store only:
 When a QueryItem has multiple tags (e.g. `tags: [course=CS101, semester=fall]`), the adapter picks **one tag** for the partition key and filters the rest client-side:
 
 ```
-QueryItem: { eventTypes: ["StudentEnrolled"], tags: [course=CS101, semester=fall] }
+QueryItem: { types: ["StudentEnrolled"], tags: [course=CS101, semester=fall] }
 
 → DynamoDB Query: PK = "I#StudentEnrolled#course=CS101", SK >= 0
 → Client-side filter: event.tags contains "semester=fall"
@@ -549,7 +549,7 @@ QueryItem: { eventTypes: ["StudentEnrolled"], tags: [course=CS101, semester=fall
 For a QueryItem with **multiple event types** and a tag, the adapter runs one query per type and merges:
 
 ```
-QueryItem: { eventTypes: ["CourseCreated", "StudentEnrolled"], tags: [course=CS101] }
+QueryItem: { types: ["CourseCreated", "StudentEnrolled"], tags: [course=CS101] }
 
 → Query 1: PK = "I#CourseCreated#course=CS101"
 → Query 2: PK = "I#StudentEnrolled#course=CS101"
@@ -564,8 +564,8 @@ Multiple QueryItems in a single Query are combined with OR semantics, matching t
 
 ```typescript
 Query.fromItems([
-  { eventTypes: ["CourseCreated"], tags: Tags.from(["course=CS101"]) },
-  { eventTypes: ["StudentEnrolled"], tags: Tags.from(["student=STU42"]) }
+  { types: ["CourseCreated"], tags: Tags.from(["course=CS101"]) },
+  { types: ["StudentEnrolled"], tags: Tags.from(["student=STU42"]) }
 ])
 ```
 
@@ -584,7 +584,7 @@ Bucket 2: A#2  → events at positions 20,001–30,000
 ...
 ```
 
-`Query.all()` reads proceed bucket by bucket. For `fromSequencePosition: 45000`:
+`Query.all()` reads proceed bucket by bucket. For `fromPosition: 45000`:
 
 1. Start at bucket `floor(45000 / 10000) = 4`
 2. Query `PK = "A#4", SK >= "00000000045000"`
