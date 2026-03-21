@@ -50,17 +50,27 @@ eventStore.append(events)
 
 ## Architecture Overview
 
-### Consistency Strategy: Batch-Linked Pessimistic Locks
+### Consistency Strategy: Lease-Based Pessimistic Locks
 
 DynamoDB lacks Postgres's `SERIALIZABLE` isolation and SQL subqueries. Instead, we use:
 
 1. **Fine-grained pessimistic locks** on `(eventType, tagValue)` pairs for mutual exclusion
-2. **A global atomic sequence counter** for event ordering
-3. **A batch commit record** for crash-safe atomic visibility
+2. **Lease-based lock lifecycle** with heartbeats (following the [AWS DynamoDB Lock Client](https://aws.amazon.com/blogs/database/building-distributed-locks-with-the-dynamodb-lock-client/) pattern)
+3. **A global atomic sequence counter** for event ordering
+4. **A batch commit record** with fencing for crash-safe atomic visibility
 
-Lock items reference the batch that holds them. When a batch commits, all its locks are **implicitly released** — the next writer checks the batch status and steals the lock immediately. No explicit release step. No TTL wait on the happy path.
+This follows established distributed locking patterns rather than inventing custom lock management. The design is structurally equivalent to a **Write-Ahead Log with Two-Phase Commit**: the batch record is the WAL entry, event writes are the redo log, the commit is the commit record, and the cleanup process is crash recovery.
 
 This gives us the DCB guarantee: the event store verifies that no new events matching the append condition's query have been added since the caller last read. If matching events are found, the append is rejected.
+
+### Why DynamoDB-Native Locks (Not Redis)
+
+We evaluated Redis (Elasticache) for lock management. While Redis offers faster lock operations (~1ms vs ~5ms), DynamoDB is the better choice for this use case:
+
+- **Higher reliability**: DynamoDB has a 99.99% SLA with synchronous 3-AZ replication. Redis Elasticache has 99.9% with async replication and a ~30s failover window during which no locks can be acquired.
+- **No split-brain risk**: DynamoDB conditional writes use single-leader-per-partition — no split-brain possible. Redis during failover can briefly accept writes on both old and new primary.
+- **Single service dependency**: No additional infrastructure to provision, monitor, or failover.
+- **Lock latency is not the bottleneck**: The 5ms DynamoDB lock operation is negligible compared to the BatchWriteItem event writes that follow. Faster locks don't improve end-to-end latency.
 
 ### Why Not Optimistic Watermarks?
 
@@ -71,7 +81,131 @@ We considered optimistic approaches using watermark items (tracking max sequence
 
 The pessimistic lock approach avoids both issues: locks are fine-grained (no false conflicts between different entities), and the actual event writes use unlimited `BatchWriteItem` calls outside any transaction.
 
-## Append Flow
+## Lock Manager
+
+The lock manager implements the AWS DynamoDB Lock Client pattern directly, adapted to our batch lifecycle. It provides lease-based mutual exclusion with heartbeats and fencing.
+
+### Lock Item Schema
+
+```
+_LOCK#<key> → {
+  PK: "_LOCK#<key>",
+  SK: "_LOCK#<key>",
+  batchId: string,         // Which batch holds this lock
+  leaseExpiry: number       // Epoch ms — when the lease expires if not renewed
+}
+```
+
+### Lease-Based Acquisition
+
+Locks are acquired with a **lease duration** (default 30 seconds). The lease expires automatically if not renewed — no separate cleanup process needed for lock expiry. A writer can only hold a lock while its lease is valid.
+
+**Acquire (single lock):**
+
+```
+UpdateItem { PK: "_LOCK#StudentEnrolled:course=CS101" }
+  SET batchId = :myBatchId, leaseExpiry = :expiry
+  CONDITION: attribute_not_exists(batchId) OR leaseExpiry < :now
+  ReturnValues: ALL_OLD
+```
+
+This single conditional write handles three cases atomically:
+- **Lock doesn't exist** (`attribute_not_exists`): creates and acquires
+- **Lock exists but lease expired** (`leaseExpiry < :now`): steals from crashed/slow writer
+- **Lock exists with valid lease**: fails — another writer is active
+
+`ReturnValues: ALL_OLD` returns the previous lock holder's `batchId` (if any), so we can mark their batch as FAILED (fencing — see below).
+
+### All-or-Nothing Multi-Lock Acquisition
+
+All lock keys are acquired in **parallel** — one network round trip regardless of lock count. If any lock fails to acquire, ALL acquired locks are released and the attempt is retried with exponential backoff + jitter.
+
+```
+1. Fire all UpdateItem calls in parallel
+2. ALL succeed → proceed (collect any old batchIds from stolen locks)
+3. ANY fail →
+   a. Release locks we acquired: REMOVE batchId, leaseExpiry CONDITION batchId = :myBatchId
+   b. Mark our batch FAILED immediately (not waiting for cleanup)
+   c. Backoff with jitter, create a new batch, retry
+```
+
+This is the standard **all-or-nothing** lock acquisition pattern. Deadlocks are impossible because we never hold-and-wait — we either have all locks or none. The jittered backoff prevents livelock.
+
+**Writer-side timeout**: After a configurable timeout (default 30 seconds), the writer gives up and throws `LockTimeoutError`. This prevents indefinite blocking if a scope is heavily contested.
+
+### Heartbeat (Lease Renewal)
+
+During long operations (writing 100K events can take seconds), the lock holder runs a background heartbeat that periodically extends the lease:
+
+```
+// Every 10 seconds (must be < lease duration):
+UpdateItem { PK: "_LOCK#<key>" }
+  SET leaseExpiry = :newExpiry
+  CONDITION: batchId = :myBatchId
+```
+
+If the heartbeat's conditional write fails, the lock was stolen (lease expired between heartbeats). The writer detects this and aborts — it does NOT proceed to commit.
+
+**Heartbeat timing**: The heartbeat interval (default 10 seconds) must be significantly less than the lease duration (default 30 seconds). This provides a safety margin: the writer has 2 missed heartbeats before the lease expires. A single missed heartbeat (network blip, GC pause) doesn't cause lock loss.
+
+### Fencing: Preventing Stale Writers
+
+The classic distributed lock fencing problem:
+
+```
+1. Writer A acquires lock, starts writing events
+2. A pauses (GC, network partition) — lease expires
+3. Writer B steals lock (lease expired), writes events, commits
+4. A resumes, tries to commit — B's events are already committed
+```
+
+Without fencing, A's commit succeeds and both writers' events become visible — a consistency violation.
+
+**Two fencing mechanisms work together:**
+
+**Fencing mechanism 1 — Steal marks old batch FAILED:**
+
+When a writer steals a lock (acquires an expired lease), it reads the old `batchId` from `ReturnValues: ALL_OLD` and marks that batch `FAILED`:
+
+```
+UpdateItem { PK: "_BATCH#<oldBatchId>" }
+  SET status = "FAILED"
+  CONDITION: status = "PENDING"
+```
+
+This prevents the old writer from committing even if it resumes.
+
+**Fencing mechanism 2 — Commit requires PENDING status:**
+
+The batch commit (Step 7) includes a condition:
+
+```
+UpdateItem { PK: "_BATCH#<uuid>" }
+  SET status = "COMMITTED"
+  CONDITION: status = "PENDING"
+```
+
+If the batch was already marked `FAILED` (by a lock stealer or cleanup), the commit fails. The writer detects this and aborts. Its partially-written events remain invisible (FAILED batch).
+
+**Together**, these mechanisms guarantee that a stale writer can never commit after its locks have been stolen. The old batch is marked FAILED before the new writer proceeds, and the commit condition catches any race between the marking and the stale writer's commit attempt.
+
+### Lock Release
+
+After a successful commit, the writer explicitly releases its locks:
+
+```
+UpdateItem { PK: "_LOCK#<key>" }
+  REMOVE batchId, leaseExpiry
+  CONDITION: batchId = :myBatchId
+```
+
+Release is **best-effort** — if the release fails (network error, process crash), the lease simply expires and the next writer steals the lock. No harm done.
+
+On **failed appends** (condition check failed, batch marked FAILED, any error): the writer marks its batch FAILED and releases locks. If it crashes before releasing, the leases expire naturally.
+
+## Append Flow (Conditional — Lock Path)
+
+All conditional appends use the lock path. `TransactWriteItems` cannot express "no events exist in partition X above position Y" (ConditionCheck operates on a single item by primary key, not partition queries), so the lock-based approach is used for all conditional appends regardless of batch size.
 
 ### Step 1: Create Batch Record
 
@@ -79,7 +213,7 @@ The pessimistic lock approach avoids both issues: locks are fine-grained (no fal
 PutItem { PK: "_BATCH#<uuid>", status: "PENDING", createdAt: now }
 ```
 
-The batch record is the **source of truth** for whether a set of locks is still active. It also gates event visibility — readers ignore events from PENDING batches.
+The batch record gates event visibility — readers ignore events from PENDING batches. It also serves as the fencing target: the commit condition checks its status.
 
 ### Step 2: Compute Lock Keys
 
@@ -88,58 +222,31 @@ The lock key set is the **union** of keys derived from the append condition's qu
 For a query item `{ eventTypes: [CourseCreated, StudentEnrolled], tags: [course=CS101] }` and events of type `CourseCreated` with tags `[course=CS101, semester=fall]`:
 
 ```
-Lock keys (sorted, to prevent deadlocks):
+Lock keys:
   _LOCK#CourseCreated:course=CS101       (from condition + event)
   _LOCK#CourseCreated:semester=fall      (from event)
   _LOCK#StudentEnrolled:course=CS101     (from condition)
 ```
 
-Lock key derivation is the **cartesian product of types × tags** from both the condition query items and the events being written, deduplicated and sorted.
+Lock key derivation is the **cartesian product of types × tags** from both the condition query items and the events being written, deduplicated.
 
-### Step 3: Acquire Locks (Parallel)
+### Step 3: Acquire Locks (Parallel, All-or-Nothing)
 
-All lock acquisitions fire as **parallel `UpdateItem` calls**. Each lock item stores only the `batchId` of the batch that holds it.
+Acquire all locks in parallel as described in the Lock Manager section. On failure, mark the batch FAILED immediately and retry with a new batch.
 
-**Fast path — lock not held (or lock item doesn't exist yet):**
-
-```
-UpdateItem { PK: "_LOCK#StudentEnrolled:course=CS101" }
-  SET batchId = :myBatchId
-  CONDITION: attribute_not_exists(batchId)
-```
-
-**Contention path — lock held by another batch:**
-
-```
-1. GetItem _LOCK#<key>              → currentBatchId
-2. GetItem _BATCH#<currentBatchId>  → check status
-
-   If COMMITTED or FAILED (or batch record missing):
-     → Previous writer finished or was cleaned up. Steal immediately:
-       UpdateItem SET batchId = :myBatchId
-         CONDITION: batchId = :oldBatchId
-
-   If PENDING:
-     → Active writer. Backoff with jitter, retry.
-```
-
-The lock acquisition logic never reasons about timeouts or batch age. A `PENDING` batch is **always** treated as active. Only the cleanup process (see below) decides when a batch is dead and transitions it to `FAILED`.
-
-The `CONDITION: batchId = :oldBatchId` on the steal prevents two writers from stealing the same lock simultaneously — only one wins the conditional write.
-
-- If **all locks acquired**: proceed to step 4
-- If **any lock contested**: release acquired locks (set batchId to a sentinel or delete), backoff, retry from step 3
-- Locks are always acquired in **sorted key order** to prevent deadlocks
+Start the heartbeat once all locks are acquired.
 
 ### Step 4: Read + Check Append Condition (Inside Lock)
 
 Using **strongly consistent reads**, query events matching the append condition's query where `sequencePosition` exceeds the last position observed by the caller.
 
 ```
-If any matching events found → release locks, throw AppendConditionError
+If any matching events found → stop heartbeat, release locks, mark batch FAILED, throw AppendConditionError
 ```
 
 The locks guarantee no other writer is concurrently appending events that match the same query. The strongly consistent read guarantees we see all committed events.
+
+**Why PENDING events don't cause false positives:** If an `I#` index item exists for a PENDING batch in our lock scope, that batch must have previously held our locks. Since we now hold the locks, that batch's lease expired and we stole the lock — meaning we marked it FAILED in Step 3. So any PENDING events in our scope are either from our own batch (not yet written) or from a FAILED batch (invisible to readers). The condition check only sees COMMITTED events.
 
 ### Step 5: Reserve Sequence Range
 
@@ -150,6 +257,13 @@ UpdateItem { PK: "_SEQ" }
 ```
 
 Atomic increment returns the previous value. Events are assigned positions `[oldValue + 1, oldValue + batchSize]`. This is an atomic `ADD`, not a conditional check — concurrent writers on different lock sets can reserve ranges simultaneously without conflicting.
+
+Update the batch record with the reserved range:
+
+```
+UpdateItem { PK: "_BATCH#<uuid>" }
+  SET seqStart = :start, seqEnd = :end
+```
 
 The global sequence counter is the **sole source of event ordering**. It guarantees a single total order across all events regardless of which client appended them. Gaps in the sequence (from failed batches) are expected and harmless — positions are never assumed to be contiguous. The implementation details of this counter (single item, sharded, etc.) may evolve, but the guarantee is the same: every committed event has a unique, globally comparable position.
 
@@ -162,24 +276,42 @@ Each event written as multiple items (see Table Design for index items)
 
 No transaction needed. No size limit. 100,000 events is just 4,000+ BatchWriteItem calls running in parallel. The locks prevent concurrent conflicting writes, and the PENDING batch status prevents partial visibility.
 
-### Step 7: Commit Batch
+The heartbeat continues running during this step, keeping the lease alive for long writes.
+
+### Step 7: Commit Batch (Fenced)
 
 ```
 UpdateItem { PK: "_BATCH#<uuid>" }
   SET status = "COMMITTED"
+  CONDITION: status = "PENDING"
 ```
 
-This single write atomically:
-- Makes all events from this batch visible to readers
-- Implicitly releases every lock held by this batch (next writer will see COMMITTED and steal)
+The `CONDITION: status = "PENDING"` is the **fencing check**. If the batch was marked FAILED (by a lock stealer after our lease expired, or by our own abort logic), the commit fails. The writer throws an error — its events remain invisible.
 
-**No explicit lock release step.** When the next writer encounters a lock pointing to this batch, it reads the batch record, sees `COMMITTED`, and immediately steals the lock.
+On success, this single write atomically makes all events from this batch visible to readers.
 
-### Out-of-Order Commit Visibility (Batch Path) — WIP
+### Step 8: Release Locks + Stop Heartbeat
 
-> **Status: Work in progress.** This section documents a known issue with a proposed mitigation. Implementation is tracked in #44.
+Stop the heartbeat timer, then release all locks (best-effort, as described above).
 
-On the batch/lock path, two concurrent writers can reserve sequence ranges independently and commit in different order:
+On **any error** in Steps 3-7: stop heartbeat, release locks, mark batch FAILED.
+
+## Append Flow (Unconditional)
+
+Appends without a condition skip locking entirely:
+
+```
+1. Reserve sequence range (atomic ADD on _SEQ)
+2. Write events via BatchWriteItem (no batchId — always visible)
+```
+
+No batch record, no locks, no heartbeat. Fully parallel with all other writers.
+
+## Out-of-Order Commit Visibility — WIP
+
+> **Status: Work in progress.** Implementation tracked in #44.
+
+On the lock path, two concurrent writers on different scopes can reserve sequence ranges independently and commit in different order:
 
 ```
 Client A: reserves positions 1-10
@@ -199,33 +331,24 @@ Between B's commit and A's commit, events 1-10 are invisible. When A commits, th
 | Decision models | **Safe** | Same reasoning — the decision was made on the visible state, and the condition validates it. |
 | Projections | **Can miss events** | A projection reading `Query.all()` sees events 11-20, checkpoints at position 20. Events 1-10 appear later but the projection starts from 21 next time — positions 1-10 are permanently skipped. |
 
-**The transactional path is not affected** — `TransactWriteItems` atomically reserves the sequence range and writes the events in a single operation, so events always become visible in sequence order.
-
-**Proposed mitigation: `_COMMITTED_THROUGH` watermark.** The batch records already store `seqStart` and `seqEnd`. On commit, the adapter queries for PENDING batches:
+**Proposed mitigation: `_COMMITTED_THROUGH` watermark.** The batch records already store `seqStart` and `seqEnd`. On commit, the adapter advances a monotonic watermark:
 
 ```
-1. Commit batch (set status = COMMITTED)
+1. Commit batch (set status = COMMITTED, CONDITION: status = PENDING)
 2. Query PENDING batches → find min(seqStart) across all PENDING
-3. If no PENDING batches: set _COMMITTED_THROUGH = _SEQ (current max)
-4. If PENDING batches exist: set _COMMITTED_THROUGH = min(seqStart) - 1
+3. If no PENDING batches: advance _COMMITTED_THROUGH to _SEQ (current max)
+4. If PENDING batches exist: advance _COMMITTED_THROUGH to min(seqStart) - 1
 ```
 
-Projections use `_COMMITTED_THROUGH` as their safe resume position — everything up to that position is visible and stable, nothing will appear below it later. No new table items or schema changes needed — the batch records already have the range data.
-
-### Optimisation: Small Appends (Transactional Path)
-
-For appends where the total item count fits within `TransactWriteItems`' 100-item limit (~40 events depending on tag count), use a **single transaction** instead:
+The watermark advance uses a conditional update to prevent lost updates from concurrent committers:
 
 ```
-TransactWriteItems:
-  ConditionCheck on relevant lock keys (no matching events with position above the caller's last observed)
-  Put each event (with all index items)
-  Update _SEQ
+UpdateItem { PK: "_COMMITTED_THROUGH" }
+  SET value = :newValue
+  CONDITION: attribute_not_exists(value) OR value < :newValue
 ```
 
-No locks, no batch record, no `batchId` on events. Fully atomic. This covers the common case (command handlers producing 1-5 events) with zero overhead on reads.
-
-The adapter selects the appropriate path automatically based on payload size. The caller always just calls `append(events, condition)`.
+This ensures the watermark can only move forward — never backwards. Projections use `_COMMITTED_THROUGH` as their safe resume position.
 
 ## Read Flow
 
@@ -298,7 +421,7 @@ All indexes are denormalized items in the main table. This is critical because *
 | All-events bucket | `A#<bucket>` | `<seqPos>` | Full event data |
 | Sequence counter | `_SEQ` | `_SEQ` | `value` (Number) |
 | Batch record | `_BATCH#<uuid>` | `_BATCH#<uuid>` | `status`, `seqStart`, `seqEnd`, `createdAt` |
-| Lock | `_LOCK#<key>` | `_LOCK#<key>` | `batchId` |
+| Lock | `_LOCK#<key>` | `_LOCK#<key>` | `batchId`, `leaseExpiry` (epoch ms) |
 
 Key design notes:
 
@@ -511,15 +634,16 @@ All estimates assume same-region Fargate + DynamoDB on-demand.
 
 | Operation | Latency | Throughput |
 |-----------|---------|------------|
-| Small append (1-5 events, transactional) | 5-15ms | Thousands/sec |
-| Large append (1,000 events, lock-based) | 100-500ms | Hundreds/sec per lock set, unlimited across different entities |
+| Small append (1-5 events, unconditional) | 5-10ms | Thousands/sec (parallel, no contention) |
+| Small append (1-5 events, conditional) | 15-25ms | Hundreds/sec per lock set (lock acquire + check + write + commit) |
+| Large append (1,000 events, conditional) | 100-500ms | Hundreds/sec per lock set, unlimited across different entities |
 | Very large append (100K events) | 5-15s | Bounded by BatchWriteItem parallelism |
 | Sequence counter (atomic ADD) | ~5ms | ~1,000 increments/sec = up to 200K events/sec with batching |
 | Read (type + tag query, single entity) | 1-5ms | Thousands/sec, scales with DynamoDB partitions |
 | Read (type-only query, large result set) | 5-50ms | Bounded by 1MB pages, parallelised across types |
 | Read (Query.all, projection catch-up) | ~2ms per bucket page | Sequential bucket reads, ~10K events per page |
 | Lock acquisition (parallel, no contention) | 5-10ms total | Effectively unlimited for non-conflicting keys |
-| Lock steal (happy path, batch committed) | 10-15ms (2 reads + 1 write) | N/A |
+| Lock steal (expired lease) | 5-10ms (single conditional write) | N/A |
 
 DynamoDB on-demand scales automatically. The primary throughput constraint is the application's ability to parallelise calls, not DynamoDB itself. 10,000+ events/sec read and write is comfortably achievable from a single Fargate task.
 
@@ -536,11 +660,10 @@ The most likely hot key is `_SEQ`. If this becomes a bottleneck at extreme scale
 
 ## Open Questions
 
-- **Out-of-order batch commits (WIP)**: On the batch/lock path, concurrent writers can commit in different order than they reserved sequence ranges, causing events to appear "back in time." Safe for append conditions and decision models, but projections can miss events. Proposed fix: `_COMMITTED_THROUGH` watermark derived from batch records. See [Out-of-Order Commit Visibility](#out-of-order-commit-visibility-batch-path--wip) section. To be implemented in #44.
-- **Cleanup threshold**: How long a PENDING batch must exist before the cleanup process marks it FAILED. Likely 30-60 seconds. This only affects crash recovery — the hot path never checks batch age.
-- **Cleanup implementation**: Options include a CloudWatch-scheduled Lambda, an application startup hook, or a DynamoDB Streams trigger. Could also run lazily — when a writer encounters a PENDING lock, it notifies the cleanup process.
-- **Orphaned event deletion**: Events from FAILED batches are invisible to readers but still consume storage. Cleanup can optionally delete them (identifiable by `batchId`). Not urgent — they're inert.
+- **Out-of-order batch commits (WIP)**: On the lock path, concurrent writers can commit in different order than they reserved sequence ranges, causing events to appear "back in time." Safe for append conditions and decision models, but projections can miss events. Proposed fix: `_COMMITTED_THROUGH` monotonic watermark derived from batch records. See [Out-of-Order Commit Visibility](#out-of-order-commit-visibility--wip) section. To be implemented in #44.
+- **Lock lease tuning**: Default lease duration (30s) and heartbeat interval (10s) may need adjustment based on observed write latencies. Too short → healthy writers lose leases during large writes. Too long → crashed writers block their scopes for longer. These are configuration options, not code changes.
+- **Orphaned event deletion**: Events from FAILED batches are invisible to readers but still consume storage. A periodic process can delete them (identifiable by `batchId`). Not urgent — they're inert. DynamoDB TTL on FAILED batch records (e.g. 24h) can trigger cascading cleanup.
 - **Tag selectivity heuristics**: When a QueryItem has multiple tags, the adapter picks one for the partition key lookup. Currently proposed: use the first tag. Could evolve to maintain tag cardinality statistics for smarter selection — but this is an optimisation, not a correctness concern.
 - **Events with many tags**: Write amplification scales as `2 * tags + 3` items per event. Events with 10+ tags produce 23+ items. Acceptable for DynamoDB throughput but worth monitoring for cost. Consider whether domain modelling can reduce tag count (e.g. a composite tag `course-semester=CS101-fall` instead of two separate tags, where the combined value is the natural consistency boundary).
 - **Large event payloads**: Full data duplication means each event's `data` field is stored `2 * tags + 3` times. For events with payloads exceeding ~50KB, consider storing the payload in S3 and referencing it by key in the event data. The 400KB DynamoDB item size limit is a hard ceiling.
-- **Sequence counter sharding**: The single `_SEQ` item supports ~1,000 increments/sec. If append throughput exceeds this (rare), the counter can be sharded: multiple counter items each managing a disjoint range, with writers randomly picking a shard. This breaks the total ordering guarantee within concurrent appends but maintains ordering within each append — acceptable if downstream consumers handle out-of-order delivery. Defer until measured as a bottleneck.
+- **Sequence counter sharding**: The single `_SEQ` item supports ~1,000 increments/sec. If append throughput exceeds this (rare), the counter can be sharded into multiple counter items with range pre-allocation. Defer until measured as a bottleneck.
