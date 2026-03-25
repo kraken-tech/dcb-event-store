@@ -1,13 +1,13 @@
 import { AppendConditionError } from "./AppendConditionError"
 import { AppendCondition } from "./EventStore"
-import { SequencePosition } from "./SequencePosition"
+import { NumericPosition } from "./NumericPosition"
 import { Query } from "./Query"
 import { Tags } from "./Tags"
 
 describe("AppendConditionError", () => {
-    const createAppendCondition = (ceiling: string = "1"): AppendCondition => ({
+    const createAppendCondition = (ceiling: number = 1): AppendCondition => ({
         failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }]),
-        after: SequencePosition.fromString(ceiling)
+        after: new NumericPosition(ceiling)
     })
 
     test("should be an instance of Error", () => {
@@ -43,9 +43,9 @@ describe("AppendConditionError", () => {
     })
 
     test("should expose after from the appendCondition", () => {
-        const condition = createAppendCondition("5")
+        const condition = createAppendCondition(5)
         const error = new AppendConditionError(condition)
-        expect(error.appendCondition.after.toString()).toBe("5")
+        expect(error.appendCondition.after!.equals(new NumericPosition(5))).toBe(true)
     })
 
     test("should have a stack trace", () => {
@@ -87,10 +87,10 @@ describe("AppendConditionError", () => {
     test("should preserve appendCondition with Query.all()", () => {
         const condition: AppendCondition = {
             failIfEventsMatch: Query.all(),
-            after: SequencePosition.fromString("10")
+            after: new NumericPosition(10)
         }
         const error = new AppendConditionError(condition)
         expect(error.appendCondition.failIfEventsMatch.isAll).toBe(true)
-        expect(error.appendCondition.after.toString()).toBe("10")
+        expect(error.appendCondition.after!.equals(new NumericPosition(10))).toBe(true)
     })
 })

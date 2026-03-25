@@ -4,11 +4,11 @@ import {
     AppendConditionError,
     DcbEvent,
     Query,
-    SequencePosition,
     streamAllEventsToArray,
     Tags
 } from "@dcb-es/event-store"
 import { PostgresEventStore } from "./PostgresEventStore"
+import { PostgresPosition } from "./PostgresPosition"
 import { getTestPgDatabasePool } from "@test/testPgDbPool"
 
 class EventType1 implements DcbEvent {
@@ -70,19 +70,19 @@ describe("postgresEventStore.append", () => {
         test("should assign a sequence number of 1 on appending the first event", async () => {
             await eventStore.append(new EventType1())
             const lastSequencePosition = (await streamAllEventsToArray(eventStore.read(Query.all()))).at(-1)?.position
-            expect(lastSequencePosition?.toString()).toBe("1")
+            expect(lastSequencePosition?.equals(new PostgresPosition(1))).toBe(true)
         })
         describe("when append condition with types filter and after provided", () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }]),
-                after: SequencePosition.fromString("1")
+                after: new PostgresPosition(1)
             }
             test("should successfully append an event without throwing under specified conditions", async () => {
                 await eventStore.append(new EventType1(), appendCondition)
                 const lastSequencePosition = (await streamAllEventsToArray(eventStore.read(Query.all()))).at(
                     -1
                 )?.position
-                expect(lastSequencePosition?.toString()).toBe("1")
+                expect(lastSequencePosition?.equals(new PostgresPosition(1))).toBe(true)
             })
 
             test("should store and return metadata on event successfully", async () => {
@@ -102,20 +102,20 @@ describe("postgresEventStore.append", () => {
         test("should increment sequence number to 2 when a second event is appended", async () => {
             await eventStore.append(new EventType1())
             const lastSequencePosition = (await streamAllEventsToArray(eventStore.read(Query.all()))).at(-1)?.position
-            expect(lastSequencePosition?.toString()).toBe("2")
+            expect(lastSequencePosition?.equals(new PostgresPosition(2))).toBe(true)
         })
 
         test("should update the sequence number to 3 after appending two more events", async () => {
             await eventStore.append([new EventType1(), new EventType1()])
             const lastSequencePosition = (await streamAllEventsToArray(eventStore.read(Query.all()))).at(-1)?.position
 
-            expect(lastSequencePosition?.toString()).toBe("3")
+            expect(lastSequencePosition?.equals(new PostgresPosition(3))).toBe(true)
         })
 
         describe("when append condition with types filter and after provided", () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }]),
-                after: SequencePosition.initial()
+                after: new PostgresPosition(0)
             }
             test("should throw an error if appended event exceeds the maximum allowed sequence number", async () => {
                 await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
@@ -166,7 +166,7 @@ describe("postgresEventStore.append", () => {
 
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"] }]),
-                after: SequencePosition.fromString("1")
+                after: new PostgresPosition(1)
             }
 
             for (let i = 0; i < 10; i++) {
@@ -197,7 +197,7 @@ describe("postgresEventStore.append", () => {
         test("should fail to append next event if append condition is no longer met", async () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }]),
-                after: SequencePosition.fromString("1")
+                after: new PostgresPosition(1)
             }
 
             // First append should pass and set sequence_position to 2
@@ -205,10 +205,10 @@ describe("postgresEventStore.append", () => {
             await eventStore.append(new EventType2())
 
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
-            expect(events.at(-2)?.position?.toString()).toBe("2")
+            expect(events.at(-2)?.position?.equals(new PostgresPosition(2))).toBe(true)
 
             // Second append should pass and as its unrelated (different event type)
-            expect(events.at(-1)?.position?.toString()).toBe("3")
+            expect(events.at(-1)?.position?.equals(new PostgresPosition(3))).toBe(true)
 
             // Third append with the same condition should fail because it would exceed after=2
             await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(AppendConditionError)
@@ -219,7 +219,7 @@ describe("postgresEventStore.append", () => {
         test("should successfully append when no prior events exist", async () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.all(),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
@@ -230,7 +230,7 @@ describe("postgresEventStore.append", () => {
             await eventStore.append(new EventType1())
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.all(),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
                 "Expected Version fail: New events matching appendCondition found."
@@ -241,7 +241,7 @@ describe("postgresEventStore.append", () => {
             await eventStore.append(new EventType1())
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.all(),
-                after: SequencePosition.fromString("1")
+                after: new PostgresPosition(1)
             }
             await eventStore.append(new EventType2(), appendCondition)
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
@@ -253,7 +253,7 @@ describe("postgresEventStore.append", () => {
         test("should successfully append when no prior events match the tag filter", async () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ tags: Tags.from(["some=tag"]) }]),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
@@ -264,7 +264,7 @@ describe("postgresEventStore.append", () => {
             await eventStore.append(new EventType1(Tags.from(["some=tag"])))
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ tags: Tags.from(["some=tag"]) }]),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await expect(eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)).rejects.toThrow(
                 "Expected Version fail: New events matching appendCondition found."
@@ -275,7 +275,7 @@ describe("postgresEventStore.append", () => {
             await eventStore.append(new EventType1(Tags.from(["other=tag"])))
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ tags: Tags.from(["some=tag"]) }]),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
@@ -285,7 +285,7 @@ describe("postgresEventStore.append", () => {
         test("should successfully append with empty tags in query item", async () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ tags: Tags.createEmpty() }]),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await eventStore.append(new EventType1(), appendCondition)
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
@@ -295,7 +295,7 @@ describe("postgresEventStore.append", () => {
         test("should successfully append with explicit empty types array and tags", async () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: [], tags: Tags.from(["some=tag"]) }]),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await eventStore.append(new EventType1(Tags.from(["some=tag"])), appendCondition)
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
@@ -309,7 +309,7 @@ describe("postgresEventStore.append", () => {
                     { tags: Tags.from(["tag1=val1"]) },
                     { tags: Tags.from(["tag2=val2"]) }
                 ]),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
                 "Expected Version fail: New events matching appendCondition found."
@@ -322,7 +322,7 @@ describe("postgresEventStore.append", () => {
             await eventStore.append(new EventType1(Tags.from(["some=tag"])))
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent2"] }, { tags: Tags.from(["some=tag"]) }]),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await expect(eventStore.append(new EventType2(), appendCondition)).rejects.toThrow(
                 "Expected Version fail: New events matching appendCondition found."
@@ -333,11 +333,37 @@ describe("postgresEventStore.append", () => {
             await eventStore.append(new EventType1(Tags.from(["some=tag"])))
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent2"] }, { tags: Tags.from(["other=tag"]) }]),
-                after: SequencePosition.fromString("0")
+                after: new PostgresPosition(0)
             }
             await eventStore.append(new EventType2(), appendCondition)
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
             expect(events.length).toBe(2)
+        })
+    })
+
+    describe("when append condition has after omitted (undefined)", () => {
+        test("should throw when matching events exist and after is undefined", async () => {
+            await eventStore.append(new EventType1())
+            const appendCondition: AppendCondition = {
+                failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }])
+            }
+            await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(AppendConditionError)
+        })
+
+        test("should succeed when no matching events exist and after is undefined", async () => {
+            await eventStore.append(new EventType1())
+            const appendCondition: AppendCondition = {
+                failIfEventsMatch: Query.fromItems([{ types: ["nonExistentEvent"], tags: Tags.createEmpty() }])
+            }
+            await expect(eventStore.append(new EventType1(), appendCondition)).resolves.not.toThrow()
+        })
+
+        test("should throw when Query.all() used with after undefined and events exist", async () => {
+            await eventStore.append(new EventType1())
+            const appendCondition: AppendCondition = {
+                failIfEventsMatch: Query.all()
+            }
+            await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(AppendConditionError)
         })
     })
 

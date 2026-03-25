@@ -1,6 +1,6 @@
 import { MemoryEventStore } from "./MemoryEventStore"
 import { DcbEvent } from "../EventStore"
-import { SequencePosition } from "../SequencePosition"
+import { NumericPosition } from "../NumericPosition"
 import { streamAllEventsToArray } from "../streamAllEventsToArray"
 import { Tags } from "../Tags"
 import { Query } from "../Query"
@@ -72,28 +72,28 @@ describe("memoryEventStore.query", () => {
             await eventStore.append(new EventType2("tag-key-2"))
         })
 
-        describe("with a fromPosition filter applied", () => {
-            test("should return the second event when read forward from sequence number 2", async () => {
+        describe("with an afterPosition filter applied", () => {
+            test("should return the second event when read forward after position 1", async () => {
                 const events = await streamAllEventsToArray(
-                    eventStore.read(Query.all(), { fromPosition: SequencePosition.fromString("2") })
+                    eventStore.read(Query.all(), { afterPosition: new NumericPosition(1) })
                 )
                 expect(events.length).toBe(1)
-                expect(events[0].position.toString()).toBe("2")
+                expect(events[0].position.equals(new NumericPosition(2))).toBe(true)
             })
 
-            test("should return the first event when read backward from sequence number 1", async () => {
+            test("should return the first event when read backward before position 2", async () => {
                 const events = await streamAllEventsToArray(
-                    eventStore.read(Query.all(), { fromPosition: SequencePosition.fromString("1"), backwards: true })
+                    eventStore.read(Query.all(), { afterPosition: new NumericPosition(2), backwards: true })
                 )
                 expect(events.length).toBe(1)
-                expect(events[0].position.toString()).toBe("1")
+                expect(events[0].position.equals(new NumericPosition(1))).toBe(true)
             })
 
-            test("should return both first and second event when read backward from sequence number 2", async () => {
+            test("should return no events when read backward before position 1", async () => {
                 const events = await streamAllEventsToArray(
-                    eventStore.read(Query.all(), { fromPosition: SequencePosition.fromString("2"), backwards: true })
+                    eventStore.read(Query.all(), { afterPosition: new NumericPosition(1), backwards: true })
                 )
-                expect(events.length).toBe(2)
+                expect(events.length).toBe(0)
             })
         })
 

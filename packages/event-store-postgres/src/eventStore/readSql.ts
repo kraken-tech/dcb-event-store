@@ -1,5 +1,6 @@
 import { Query, QueryItem, ReadOptions } from "@dcb-es/event-store"
 import { ParamManager } from "./utils"
+import { PostgresPosition } from "./PostgresPosition"
 
 export const readSqlWithCursor = (query: Query, tableName: string, options?: ReadOptions) => {
     const { sql, params } = readSql(query, tableName, options)
@@ -15,7 +16,7 @@ const readSql = (query: Query, tableName: string, options?: ReadOptions) => {
     const pm = new ParamManager()
 
     const sql = `
-    SELECT 
+    SELECT
       e.sequence_position,
       e.type,
       e.data,
@@ -24,7 +25,7 @@ const readSql = (query: Query, tableName: string, options?: ReadOptions) => {
       to_char(e."timestamp" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "timestamp"
     FROM ${tableName} e
     ${query.isAll ? "" : readCriteriaJoin(query, pm, tableName, options)}
-    ${whereClause([fromSeqNoFilter(pm, "e", options)])}
+    ${whereClause([afterPositionFilter(pm, "e", options)])}
     ORDER BY e.sequence_position ${options?.backwards ? "DESC" : ""}
     ${options?.limit ? `LIMIT ${options.limit}` : ""};
   `
@@ -36,18 +37,18 @@ const notEmpty = (s: string): boolean => s !== null && s.trim() !== ""
 const tagFilterSnip = (pm: ParamManager, c: QueryItem): string =>
     c.tags && c.tags.length ? `tags && ${pm.add(c.tags.values)}::text[]` : ""
 
-const fromSeqNoFilter = (pm: ParamManager, tableAlias: string, options?: ReadOptions): string =>
-    options?.fromPosition
+const afterPositionFilter = (pm: ParamManager, tableAlias: string, options?: ReadOptions): string =>
+    options?.afterPosition
         ? `${tableAlias ? `${tableAlias}.` : ""}sequence_position ${
-              options.backwards ? "<=" : ">="
-          } ${pm.add(options.fromPosition.toString())}`
+              options.backwards ? "<" : ">"
+          } ${pm.add((options.afterPosition as PostgresPosition).value)}`
         : ""
 
 const typesFilter = (c: QueryItem, pm: ParamManager): string =>
     c.types?.length ? `type IN (${c.types.map(t => pm.add(t)).join(", ")})` : ""
 
 const getFilterString = (c: QueryItem, pm: ParamManager, options?: ReadOptions): string => {
-    const filters = [typesFilter(c, pm), tagFilterSnip(pm, c), fromSeqNoFilter(pm, "", options)]
+    const filters = [typesFilter(c, pm), tagFilterSnip(pm, c), afterPositionFilter(pm, "", options)]
     return whereClause(filters)
 }
 
@@ -55,7 +56,7 @@ export const readCriteriaJoin = (query: Query, pm: ParamManager, tableName: stri
     if (query.isAll) return ""
     const criteriaQueries = query.items.map(
         c => `
-      SELECT 
+      SELECT
          sequence_position
       FROM ${tableName}
       ${getFilterString(c, pm, options)}

@@ -1,5 +1,6 @@
 import { DcbEvent, Query, SequencePosition } from "@dcb-es/event-store"
 import { ParamManager, dbEventConverter } from "./utils"
+import { PostgresPosition } from "./PostgresPosition"
 
 export const appendSql = (
     events: DcbEvent[],
@@ -27,15 +28,17 @@ export const appendSql = (
 
     // Build filtering clause if needed
     const filterClause = (): string => {
-        if (!failIfEventsMatch || !after) return ""
-        const maxSeqNoParam = params.add(after.toString())
+        if (!failIfEventsMatch) return ""
+
+        const seqFilter = after ? `sequence_position > ${params.add((after as PostgresPosition).value)}::bigint` : null
 
         if (failIfEventsMatch.isAll) {
+            const conditions = seqFilter ? `WHERE ${seqFilter}` : ""
             return `
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM ${tableName}
-                WHERE sequence_position > ${maxSeqNoParam}::bigint
+                ${conditions}
             )`
         }
 
@@ -43,10 +46,8 @@ export const appendSql = (
             WHERE NOT EXISTS (
                 ${failIfEventsMatch.items
                     .map(c => {
-                        const conditions = [
-                            `tags @> ${params.add(c.tags?.values ?? [])}::text[]`,
-                            `sequence_position > ${maxSeqNoParam}::bigint`
-                        ]
+                        const conditions = [`tags @> ${params.add(c.tags?.values ?? [])}::text[]`]
+                        if (seqFilter) conditions.push(seqFilter)
                         if (c.types?.length) {
                             conditions.unshift(`type IN (${c.types.map(t => params.add(t)).join(", ")})`)
                         }
