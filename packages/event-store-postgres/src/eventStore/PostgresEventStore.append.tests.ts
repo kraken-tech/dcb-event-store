@@ -115,7 +115,7 @@ describe("postgresEventStore.append", () => {
         describe("when append condition with types filter and after provided", () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }]),
-                after: SequencePosition.initial()
+                after: SequencePosition.fromString("0")
             }
             test("should throw an error if appended event exceeds the maximum allowed sequence number", async () => {
                 await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(

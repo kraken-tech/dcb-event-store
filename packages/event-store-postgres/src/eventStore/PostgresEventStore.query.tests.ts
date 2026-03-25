@@ -88,7 +88,7 @@ describe("postgresEventStore.query", () => {
             await eventStore.append(new EventType2("ev-2"))
         })
 
-        describe("with an after filter applied", () => {
+        describe("with a fromPosition filter applied", () => {
             test("should return both events when readAll called with no filter", async () => {
                 const events = await streamAllEventsToArray(eventStore.read(Query.all()))
                 expect(events.length).toBe(2)

@@ -192,6 +192,7 @@ describe("memoryEventStore.append", () => {
             })
         })
 
+
         describe("when no append condition is provided", () => {
             test("should not throw any error", async () => {
                 await expect(eventStore.append(new EventType1())).resolves.not.toThrow()

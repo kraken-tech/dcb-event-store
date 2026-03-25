@@ -72,7 +72,7 @@ describe("memoryEventStore.query", () => {
             await eventStore.append(new EventType2("tag-key-2"))
         })
 
-        describe("with an after filter applied", () => {
+        describe("with a fromPosition filter applied", () => {
             test("should return the second event when read forward after position 1", async () => {
                 const events = await streamAllEventsToArray(
                     eventStore.read(Query.all(), { fromPosition: SequencePosition.fromString("2") })
