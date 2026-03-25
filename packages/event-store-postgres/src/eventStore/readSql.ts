@@ -26,7 +26,7 @@ const readSql = (query: Query, tableName: string, options?: ReadOptions) => {
     ${query.isAll ? "" : readCriteriaJoin(query, pm, tableName, options)}
     ${whereClause([afterFilter(pm, "e", options)])}
     ORDER BY e.sequence_position ${options?.backwards ? "DESC" : ""}
-    ${options?.limit ? `LIMIT ${options.limit}` : ""};
+    ${options?.limit ? `LIMIT ${pm.add(options.limit)}` : ""};
   `
     return { sql, params: pm.params }
 }

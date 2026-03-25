@@ -28,6 +28,8 @@ export class PostgresPosition extends SequencePosition {
     }
 
     static parse(raw: string): PostgresPosition {
-        return new PostgresPosition(parseInt(raw, 10))
+        const value = parseInt(raw, 10)
+        if (isNaN(value)) throw new Error(`Invalid position value: "${raw}"`)
+        return new PostgresPosition(value)
     }
 }

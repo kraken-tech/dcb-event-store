@@ -91,7 +91,7 @@ describe("memoryEventStore.query", () => {
 
             test("should return no events when read backward before position 1", async () => {
                 const events = await streamAllEventsToArray(
-                    eventStore.read(Query.all(), { fromPosition: SequencePosition.fromString("2"), backwards: true })
+                    eventStore.read(Query.all(), { fromPosition: SequencePosition.initial(), backwards: true })
                 )
                 expect(events.length).toBe(0)
             })
