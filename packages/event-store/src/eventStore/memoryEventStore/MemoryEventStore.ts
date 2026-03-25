@@ -1,17 +1,33 @@
 import { SequencedEvent, EventStore, AppendCondition, DcbEvent, ReadOptions } from "../EventStore"
 import { AppendConditionError } from "../AppendConditionError"
+import { NumericPosition } from "../NumericPosition"
 import { SequencePosition } from "../SequencePosition"
 import { Timestamp } from "../Timestamp"
-import { isSeqOutOfRange, matchesQueryItem as matchesQueryItem, deduplicateEvents } from "./utils"
+import { isInRange, matchesQueryItem } from "./utils"
 import { Query } from "../Query"
 
-export const ensureIsArray = (events: DcbEvent | DcbEvent[]) => (Array.isArray(events) ? events : [events])
+const ensureIsArray = (events: DcbEvent | DcbEvent[]) => (Array.isArray(events) ? events : [events])
 
-const maxSeqNo = (events: SequencedEvent[]) =>
+const asNumeric = (pos: SequencePosition) => (pos as NumericPosition).value
+
+const lastPosition = (events: SequencedEvent[]) =>
     events
         .map(event => event.position)
-        .filter(seqNum => seqNum !== undefined)
-        .pop() || SequencePosition.zero()
+        .filter(pos => pos !== undefined)
+        .pop() || new NumericPosition(0)
+
+const deduplicateEvents = (events: SequencedEvent[]): SequencedEvent[] => {
+    const seen = new Map<number, SequencedEvent>()
+    for (const event of events) {
+        const key = asNumeric(event.position)
+        if (!seen.has(key)) seen.set(key, event)
+    }
+    return Array.from(seen.values())
+}
+
+const byPosition = (a: SequencedEvent, b: SequencedEvent) => asNumeric(a.position) - asNumeric(b.position)
+
+const byPositionDesc = (a: SequencedEvent, b: SequencedEvent) => asNumeric(b.position) - asNumeric(a.position)
 
 export class MemoryEventStore implements EventStore {
     private testListenerRegistry: { read: () => void; append: () => void } = {
@@ -30,37 +46,25 @@ export class MemoryEventStore implements EventStore {
     }
 
     async *read(query: Query, options?: ReadOptions): AsyncGenerator<SequencedEvent> {
-        yield* this.#read({ query, options })
-    }
-    async *#read({ query, options }: { query: Query; options?: ReadOptions }): AsyncGenerator<SequencedEvent> {
         if (this.testListenerRegistry.read) this.testListenerRegistry.read()
 
-        const step = options?.backwards ? -1 : 1
-        const maxPosition = maxSeqNo(this.events)
-        const defaultPosition = options?.backwards ? maxPosition : SequencePosition.zero()
-        let currentPosition = options?.fromPosition ?? defaultPosition
         let yieldedCount = 0
 
+        const filterByPosition = (event: SequencedEvent): boolean => {
+            if (!options?.after) return true
+            return isInRange(event.position, options.after, options?.backwards)
+        }
+
         const allMatchedEvents = !query.isAll
-            ? query.items.flatMap((criterion, index) => {
-                  const matchedEvents = this.events
-                      .filter(
-                          event =>
-                              !isSeqOutOfRange(event.position, currentPosition, options?.backwards) &&
-                              matchesQueryItem(criterion, event)
-                      )
+            ? query.items.flatMap((criterion, index) =>
+                  this.events
+                      .filter(event => filterByPosition(event) && matchesQueryItem(criterion, event))
                       .map(event => ({ ...event, matchedCriteria: [index.toString()] }))
-                      .sort((a, b) => a.position.value - b.position.value)
+                      .sort(byPosition)
+              )
+            : this.events.filter(filterByPosition)
 
-                  return matchedEvents
-              })
-            : this.events.filter(ev => !isSeqOutOfRange(ev.position, currentPosition, options?.backwards))
-
-        const uniqueEvents = deduplicateEvents(allMatchedEvents)
-            .sort((a, b) => a.position.value - b.position.value)
-            .sort((a, b) =>
-                options?.backwards ? b.position.value - a.position.value : a.position.value - b.position.value
-            )
+        const uniqueEvents = deduplicateEvents(allMatchedEvents).sort(options?.backwards ? byPositionDesc : byPosition)
 
         for (const event of uniqueEvents) {
             yield event
@@ -68,24 +72,21 @@ export class MemoryEventStore implements EventStore {
             if (options?.limit && yieldedCount >= options.limit) {
                 break
             }
-            currentPosition = event.position.plus(step)
         }
     }
 
     async append(events: DcbEvent | DcbEvent[], appendCondition?: AppendCondition): Promise<void> {
         if (this.testListenerRegistry.append) this.testListenerRegistry.append()
-        const nextPosition = maxSeqNo(this.events).inc()
+        const nextValue = asNumeric(lastPosition(this.events)) + 1
         const sequencedEvents: Array<SequencedEvent> = ensureIsArray(events).map((ev, i) => ({
             event: ev,
             timestamp: Timestamp.now(),
-            position: nextPosition.plus(i)
+            position: new NumericPosition(nextValue + i)
         }))
 
         if (appendCondition) {
             const { failIfEventsMatch, after } = appendCondition
-
             const matchingEvents = getMatchingEvents(failIfEventsMatch, after, this.events)
-
             if (matchingEvents.length > 0) throw new AppendConditionError(appendCondition)
         }
 
@@ -93,12 +94,15 @@ export class MemoryEventStore implements EventStore {
     }
 }
 
-const getMatchingEvents = (query: Query, maxSeqNo: SequencePosition, events: SequencedEvent[]) => {
-    if (query.isAll) return events.filter(event => !isSeqOutOfRange(event.position, maxSeqNo.plus(1), false))
+const getMatchingEvents = (query: Query, after: SequencePosition | undefined, events: SequencedEvent[]) => {
+    const filterByPosition = (event: SequencedEvent): boolean => {
+        if (!after) return true
+        return event.position.isAfter(after)
+    }
 
-    return (query ?? []).items.flatMap(queryItem =>
-        events.filter(
-            event => !isSeqOutOfRange(event.position, maxSeqNo.plus(1), false) && matchesQueryItem(queryItem, event)
-        )
+    if (query.isAll) return events.filter(filterByPosition)
+
+    return query.items.flatMap(queryItem =>
+        events.filter(event => filterByPosition(event) && matchesQueryItem(queryItem, event))
     )
 }

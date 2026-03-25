@@ -1,7 +1,7 @@
 import { MemoryEventStore } from "./MemoryEventStore"
 import { AppendCondition, DcbEvent } from "../EventStore"
 import { AppendConditionError } from "../AppendConditionError"
-import { SequencePosition } from "../SequencePosition"
+import { NumericPosition } from "../NumericPosition"
 import { streamAllEventsToArray } from "../streamAllEventsToArray"
 import { Tags } from "../Tags"
 import { Query } from "../Query"
@@ -34,19 +34,19 @@ describe("memoryEventStore.append", () => {
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
             const lastSequencePosition = events.at(-1)?.position
 
-            expect(lastSequencePosition?.value).toBe(1)
+            expect(lastSequencePosition?.equals(new NumericPosition(1))).toBe(true)
         })
         describe("when append condition with types filter and after provided", () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }]),
-                after: SequencePosition.create(1)
+                after: new NumericPosition(1)
             }
             test("should successfully append an event without throwing under specified conditions", async () => {
                 await eventStore.append(new EventType1(), appendCondition)
                 const events = await streamAllEventsToArray(eventStore.read(Query.all()))
                 const lastSequencePosition = events.at(-1)?.position
 
-                expect(lastSequencePosition?.value).toBe(1)
+                expect(lastSequencePosition?.equals(new NumericPosition(1))).toBe(true)
             })
         })
     })
@@ -62,7 +62,7 @@ describe("memoryEventStore.append", () => {
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
             const lastSequencePosition = events.at(-1)?.position
 
-            expect(lastSequencePosition?.value).toBe(2)
+            expect(lastSequencePosition?.equals(new NumericPosition(2))).toBe(true)
         })
 
         test("should update the sequence number to 3 after appending two more events", async () => {
@@ -70,13 +70,13 @@ describe("memoryEventStore.append", () => {
             const events = await streamAllEventsToArray(eventStore.read(Query.all()))
             const lastSequencePosition = events.at(-1)?.position
 
-            expect(lastSequencePosition?.value).toBe(3)
+            expect(lastSequencePosition?.equals(new NumericPosition(3))).toBe(true)
         })
 
         describe("when append condition with types filter and after provided", () => {
             const appendCondition: AppendCondition = {
                 failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }]),
-                after: SequencePosition.zero()
+                after: new NumericPosition(0)
             }
             test("should throw an error if appended event exceeds the maximum allowed sequence number", async () => {
                 await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
@@ -85,9 +85,7 @@ describe("memoryEventStore.append", () => {
             })
 
             test("should throw an AppendConditionError instance", async () => {
-                await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(
-                    AppendConditionError
-                )
+                await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(AppendConditionError)
             })
 
             test("should include the appendCondition in the thrown error", async () => {
@@ -127,8 +125,10 @@ describe("memoryEventStore.append", () => {
         describe("when append condition with tag filter and maxSequencePosition provided", () => {
             test("should throw AppendConditionError when tag-filtered events exist beyond ceiling", async () => {
                 const appendCondition: AppendCondition = {
-                    failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.fromObj({ testTagKey: "tagA" }) }]),
-                    after: SequencePosition.zero()
+                    failIfEventsMatch: Query.fromItems([
+                        { types: ["testEvent1"], tags: Tags.fromObj({ testTagKey: "tagA" }) }
+                    ]),
+                    after: new NumericPosition(0)
                 }
 
                 await eventStore.append(new EventType1("tagA"))
@@ -140,13 +140,55 @@ describe("memoryEventStore.append", () => {
 
             test("should not throw when tag-filtered events do not match", async () => {
                 const appendCondition: AppendCondition = {
-                    failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.fromObj({ testTagKey: "tagB" }) }]),
-                    after: SequencePosition.zero()
+                    failIfEventsMatch: Query.fromItems([
+                        { types: ["testEvent1"], tags: Tags.fromObj({ testTagKey: "tagB" }) }
+                    ]),
+                    after: new NumericPosition(0)
                 }
 
                 await eventStore.append(new EventType1("tagA"))
 
                 await expect(eventStore.append(new EventType1("tagA"), appendCondition)).resolves.not.toThrow()
+            })
+        })
+
+        describe("when append condition with after omitted (undefined)", () => {
+            test("should throw when matching events exist and after is undefined", async () => {
+                const appendCondition: AppendCondition = {
+                    failIfEventsMatch: Query.fromItems([{ types: ["testEvent1"], tags: Tags.createEmpty() }])
+                }
+                await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(AppendConditionError)
+            })
+
+            test("should succeed when no matching events exist and after is undefined", async () => {
+                const appendCondition: AppendCondition = {
+                    failIfEventsMatch: Query.fromItems([{ types: ["nonExistentEvent"], tags: Tags.createEmpty() }])
+                }
+                await expect(eventStore.append(new EventType1(), appendCondition)).resolves.not.toThrow()
+            })
+        })
+
+        describe("when append condition has multiple query items (OR semantics)", () => {
+            test("should throw when any query item matches", async () => {
+                const appendCondition: AppendCondition = {
+                    failIfEventsMatch: Query.fromItems([
+                        { types: ["nonExistentEvent"], tags: Tags.createEmpty() },
+                        { types: ["testEvent1"], tags: Tags.createEmpty() }
+                    ]),
+                    after: new NumericPosition(0)
+                }
+                await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(AppendConditionError)
+            })
+
+            test("should succeed when no query items match", async () => {
+                const appendCondition: AppendCondition = {
+                    failIfEventsMatch: Query.fromItems([
+                        { types: ["nonExistentEvent1"], tags: Tags.createEmpty() },
+                        { types: ["nonExistentEvent2"], tags: Tags.createEmpty() }
+                    ]),
+                    after: new NumericPosition(0)
+                }
+                await expect(eventStore.append(new EventType1(), appendCondition)).resolves.not.toThrow()
             })
         })
 

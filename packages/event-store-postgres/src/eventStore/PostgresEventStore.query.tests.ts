@@ -1,7 +1,8 @@
-import { DcbEvent, streamAllEventsToArray, SequencePosition, Tags, Query } from "@dcb-es/event-store"
+import { DcbEvent, streamAllEventsToArray, Tags, Query } from "@dcb-es/event-store"
 import { Pool, PoolClient } from "pg"
 import { getTestPgDatabasePool } from "@test/testPgDbPool"
 import { PostgresEventStore } from "./PostgresEventStore"
+import { PostgresPosition } from "./PostgresPosition"
 
 class EventType1 implements DcbEvent {
     type: "testEvent1" = "testEvent1"
@@ -88,42 +89,42 @@ describe("postgresEventStore.query", () => {
             await eventStore.append(new EventType2("ev-2"))
         })
 
-        describe("with a fromPosition filter applied", () => {
+        describe("with an after filter applied", () => {
             test("should return both events when readAll called with no filter", async () => {
                 const events = await streamAllEventsToArray(eventStore.read(Query.all()))
                 expect(events.length).toBe(2)
-                expect(events[0].position.value).toBe(1)
-                expect(events[1].position.value).toBe(2)
+                expect(events[0].position.equals(new PostgresPosition(1))).toBe(true)
+                expect(events[1].position.equals(new PostgresPosition(2))).toBe(true)
             })
 
             test("should return both events when readAll called with backwards and no filter", async () => {
                 const events = await streamAllEventsToArray(eventStore.read(Query.all(), { backwards: true }))
                 expect(events.length).toBe(2)
-                expect(events[0].position.value).toBe(2)
-                expect(events[1].position.value).toBe(1)
+                expect(events[0].position.equals(new PostgresPosition(2))).toBe(true)
+                expect(events[1].position.equals(new PostgresPosition(1))).toBe(true)
             })
 
-            test("should return the second event when read forward from sequence number 2", async () => {
+            test("should return the second event when read forward after position 1", async () => {
                 const events = await streamAllEventsToArray(
-                    eventStore.read(Query.all(), { fromPosition: SequencePosition.create(2) })
+                    eventStore.read(Query.all(), { after: new PostgresPosition(1) })
                 )
                 expect(events.length).toBe(1)
-                expect(events[0].position.value).toBe(2)
+                expect(events[0].position.equals(new PostgresPosition(2))).toBe(true)
             })
 
-            test("should return the first event when read backward from sequence number 1", async () => {
+            test("should return the first event when read backward before position 2", async () => {
                 const events = await streamAllEventsToArray(
-                    eventStore.read(Query.all(), { fromPosition: SequencePosition.create(1), backwards: true })
+                    eventStore.read(Query.all(), { after: new PostgresPosition(2), backwards: true })
                 )
                 expect(events.length).toBe(1)
-                expect(events[0].position.value).toBe(1)
+                expect(events[0].position.equals(new PostgresPosition(1))).toBe(true)
             })
 
-            test("should return both first and second event when read backward from sequence number 2", async () => {
+            test("should return no events when read backward before position 1", async () => {
                 const events = await streamAllEventsToArray(
-                    eventStore.read(Query.all(), { fromPosition: SequencePosition.create(2), backwards: true })
+                    eventStore.read(Query.all(), { after: new PostgresPosition(1), backwards: true })
                 )
-                expect(events.length).toBe(2)
+                expect(events.length).toBe(0)
             })
         })
 
@@ -251,6 +252,58 @@ describe("postgresEventStore.query", () => {
             expect(events.length).toBe(2)
             expect(events[0].event.tags.values).toEqual(["testTagKey=ev-1"])
             expect(events[1].event.tags.values).toEqual(["testTagKey=ev-2"])
+        })
+    })
+
+    describe("boundary and combination tests", () => {
+        beforeEach(async () => {
+            await eventStore.append(new EventType1("ev-1"))
+            await eventStore.append(new EventType2("ev-2"))
+            await eventStore.append(new EventType2("ev-3"))
+        })
+
+        test("forward read with after = 2 should exclude event at position 2", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.all(), { after: new PostgresPosition(2) })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].position.equals(new PostgresPosition(3))).toBe(true)
+        })
+
+        test("backward read with after = 2 should exclude event at position 2", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.all(), { after: new PostgresPosition(2), backwards: true })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].position.equals(new PostgresPosition(1))).toBe(true)
+        })
+
+        test("should combine after + limit forward", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.all(), { after: new PostgresPosition(1), limit: 1 })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].position.equals(new PostgresPosition(2))).toBe(true)
+        })
+
+        test("should combine after + backwards + limit", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.all(), { after: new PostgresPosition(3), backwards: true, limit: 1 })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].position.equals(new PostgresPosition(2))).toBe(true)
+        })
+
+        test("should combine after + type filter + limit", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.fromItems([{ types: ["testEvent2"], tags: Tags.createEmpty() }]), {
+                    after: new PostgresPosition(1),
+                    limit: 1
+                })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].event.type).toBe("testEvent2")
+            expect(events[0].position.equals(new PostgresPosition(2))).toBe(true)
         })
     })
 

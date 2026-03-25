@@ -2,6 +2,7 @@ import { buildDecisionModel } from "./buildDecisionModel"
 import { CourseCapacity, CourseExists } from "./buildDecisionModel.tests.handlers"
 import { CourseCapacityWasChangedEvent, CourseWasRegisteredEvent } from "./buildDecisionModel.tests.events"
 import { MemoryEventStore } from "../eventStore/memoryEventStore/MemoryEventStore"
+import { NumericPosition } from "../eventStore/NumericPosition"
 import { AppendCondition } from "../eventStore/EventStore"
 import { Tags } from "../eventStore/Tags"
 import { QueryItem } from "../eventStore/Query"
@@ -32,8 +33,8 @@ describe("buildDecisionModel", () => {
                 expect(courseExists).toBe(false)
             })
 
-            test("should set the maximum sequence number to 0 in appendCondition", async () => {
-                expect(appendCondition?.after.value).toBe(0)
+            test("should have undefined after when no events exist", async () => {
+                expect(appendCondition.after).toBeUndefined()
             })
 
             test("should have a single event type of 'courseWasRegistered' in appendCondition", async () => {
@@ -71,8 +72,8 @@ describe("buildDecisionModel", () => {
             expect(courseExists).toBe(true)
         })
 
-        test("should set the maximum sequence number to 1 in appendCondition", async () => {
-            expect(appendCondition?.after.value).toBe(1)
+        test("should set after to the position of the last event", async () => {
+            expect(appendCondition.after!.equals(new NumericPosition(1))).toBe(true)
         })
 
         test("should have a single event type of 'courseWasRegistered' in appendCondition", async () => {
@@ -114,8 +115,8 @@ describe("buildDecisionModel", () => {
             expect(courseCapacity?.capacity).toBe(15)
         })
 
-        test("should set the maximum sequence number to 2 in appendCondition", async () => {
-            expect(appendCondition?.after.value).toBe(2)
+        test("should set after to the position of the last event", async () => {
+            expect(appendCondition.after!.equals(new NumericPosition(2))).toBe(true)
         })
 
         test("should have the 4 correct event types in appendCondition", async () => {
@@ -167,8 +168,8 @@ describe("buildDecisionModel", () => {
             expect(courseCapacity?.capacity).toBe(15)
         })
 
-        test("should set the maximum sequence number to 2 in appendCondition", async () => {
-            expect(appendCondition?.after.value).toBe(2)
+        test("should set after to the position of the last event", async () => {
+            expect(appendCondition.after!.equals(new NumericPosition(2))).toBe(true)
         })
 
         test("should have the 4 correct event types in appendCondition", async () => {
@@ -192,6 +193,41 @@ describe("buildDecisionModel", () => {
 
         test("should indicate course exists", async () => {
             expect(courseExists).toBe(true)
+        })
+    })
+
+    describe("when handler tagFilter matches no events but other handler does", () => {
+        let courseExistsForCourse1: boolean
+        let courseExistsForCourse2: boolean
+
+        beforeEach(async () => {
+            eventStore = new MemoryEventStore()
+            await eventStore.append(
+                new CourseWasRegisteredEvent({
+                    courseId: "course-1",
+                    capacity: 10
+                })
+            )
+
+            const result = await buildDecisionModel(eventStore, {
+                courseExistsForCourse1: CourseExists("course-1"),
+                courseExistsForCourse2: CourseExists("course-2")
+            })
+            courseExistsForCourse1 = result.state.courseExistsForCourse1
+            courseExistsForCourse2 = result.state.courseExistsForCourse2
+            appendCondition = result.appendCondition
+        })
+
+        test("should update matching handler state", () => {
+            expect(courseExistsForCourse1).toBe(true)
+        })
+
+        test("should retain init state for non-matching handler", () => {
+            expect(courseExistsForCourse2).toBe(false)
+        })
+
+        test("should set after to the last event position", () => {
+            expect(appendCondition.after!.equals(new NumericPosition(1))).toBe(true)
         })
     })
 })

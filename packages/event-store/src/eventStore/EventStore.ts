@@ -18,12 +18,12 @@ export interface SequencedEvent<T extends DcbEvent = DcbEvent> {
 
 export type AppendCondition = {
     failIfEventsMatch: Query
-    after: SequencePosition
+    after?: SequencePosition
 }
 
 export interface ReadOptions {
     backwards?: boolean
-    fromPosition?: SequencePosition
+    after?: SequencePosition
     limit?: number
 }
 

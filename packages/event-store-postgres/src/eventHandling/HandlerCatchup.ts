@@ -1,6 +1,7 @@
 import { EventHandler, EventStore, Query, SequencePosition, Tags } from "@dcb-es/event-store"
 import { Pool, PoolClient } from "pg"
 import { ensureHandlersInstalled, registerhandlers } from "./ensureHandlersInstalled"
+import { PostgresPosition } from "../eventStore/PostgresPosition"
 
 export type HandlerCheckPoints = Record<string, SequencePosition>
 
@@ -53,13 +54,11 @@ export class HandlerCatchup {
             )
 
             const result = Object.keys(handlers).reduce((acc, handlerId) => {
-                const rawPosition = selectResult.rows.find(
-                    row => row.handler_id === handlerId
-                )?.last_sequence_position
+                const rawPosition = selectResult.rows.find(row => row.handler_id === handlerId)?.last_sequence_position
                 if (rawPosition !== undefined) {
                     return {
                         ...acc,
-                        [handlerId]: SequencePosition.create(parseInt(rawPosition))
+                        [handlerId]: new PostgresPosition(parseInt(`${rawPosition}`))
                     }
                 } else {
                     throw new Error(`Failed to retrieve sequence number for handler ${handlerId}`)
@@ -85,7 +84,7 @@ export class HandlerCatchup {
 
         const updateParams = Object.entries(locks).flatMap(([handlerId, position]) => [
             handlerId,
-            position.value
+            (position as PostgresPosition).value
         ])
 
         const updateQuery = `
@@ -105,12 +104,13 @@ export class HandlerCatchup {
         if (!toSequencePosition) {
             const lastEventInStore = (await this.eventStore.read(Query.all(), { backwards: true, limit: 1 }).next())
                 .value
-            toSequencePosition = lastEventInStore?.position ?? SequencePosition.zero()
+            if (!lastEventInStore) return currentPosition
+            toSequencePosition = lastEventInStore.position
         }
 
         const query = Query.fromItems([{ types: Object.keys(handler.when) as string[], tags: Tags.createEmpty() }])
-        for await (const event of this.eventStore.read(query, { fromPosition: currentPosition.inc() })) {
-            if (toSequencePosition && event.position.value > toSequencePosition.value) {
+        for await (const event of this.eventStore.read(query, { after: currentPosition })) {
+            if (toSequencePosition && event.position.isAfter(toSequencePosition)) {
                 break
             }
             if (handler.when[event.event.type]) await handler.when[event.event.type](event)
