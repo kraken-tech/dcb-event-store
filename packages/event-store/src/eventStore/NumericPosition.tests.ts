@@ -113,5 +113,30 @@ describe("NumericPosition", () => {
             const restored = NumericPosition.parse(original.toString())
             expect(restored.equals(original)).toBe(true)
         })
+
+        test("should parse negative number string", () => {
+            const pos = NumericPosition.parse("-5")
+            expect(pos.value).toBe(-5)
+        })
+
+        test("should parse large number string", () => {
+            const pos = NumericPosition.parse("9999999")
+            expect(pos.value).toBe(9999999)
+        })
+
+        test("should produce NaN for non-numeric string", () => {
+            const pos = NumericPosition.parse("abc")
+            expect(pos.value).toBeNaN()
+        })
+
+        test("should produce NaN for empty string", () => {
+            const pos = NumericPosition.parse("")
+            expect(pos.value).toBeNaN()
+        })
+
+        test("should truncate decimal string to integer", () => {
+            const pos = NumericPosition.parse("123.456")
+            expect(pos.value).toBe(123)
+        })
     })
 })

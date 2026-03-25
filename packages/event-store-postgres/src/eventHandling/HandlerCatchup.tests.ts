@@ -34,6 +34,7 @@ describe("UpdatePostgresHandlers tests", () => {
         client.release()
         await pool.query("TRUNCATE table events")
         await pool.query("ALTER SEQUENCE events_sequence_position_seq RESTART WITH 1")
+        await pool.query("UPDATE _handler_bookmarks SET last_sequence_position = 0")
     })
 
     afterAll(async () => {
@@ -69,5 +70,64 @@ describe("UpdatePostgresHandlers tests", () => {
         expect(result.rows).toHaveLength(2)
         expect(result.rows[0].handler_id).toBe(Object.keys(handlers)[0])
         expect(result.rows[1].handler_id).toBe(Object.keys(handlers)[1])
+    })
+
+    test("should handle catchup with empty store without error", async () => {
+        await handlerCatchup.catchupHandlers(handlers)
+        const result = await pool.query(`SELECT * FROM _handler_bookmarks`)
+        expect(result.rows).toHaveLength(2)
+        expect(Number(result.rows[0].last_sequence_position)).toBe(0)
+        expect(Number(result.rows[1].last_sequence_position)).toBe(0)
+    })
+
+    describe("event processing", () => {
+        const handlerId = uuid().toString()
+        let processedCount: number
+
+        beforeAll(async () => {
+            await pool.query(
+                `INSERT INTO _handler_bookmarks (handler_id, last_sequence_position) VALUES ($1, 0) ON CONFLICT DO NOTHING`,
+                [handlerId]
+            )
+        })
+
+        beforeEach(() => {
+            processedCount = 0
+        })
+
+        test("should process events and advance bookmark position", async () => {
+            const trackingHandlers = {
+                [handlerId]: {
+                    when: {
+                        testEvent1: async () => {
+                            processedCount++
+                        }
+                    }
+                }
+            }
+            await eventStore.append({ type: "testEvent1", data: {}, metadata: {}, tags: Tags.createEmpty() })
+            await eventStore.append({ type: "testEvent1", data: {}, metadata: {}, tags: Tags.createEmpty() })
+            await handlerCatchup.catchupHandlers(trackingHandlers)
+            expect(processedCount).toBe(2)
+        })
+
+        test("should not reprocess already-seen events on second catchup", async () => {
+            const trackingHandlers = {
+                [handlerId]: {
+                    when: {
+                        testEvent1: async () => {
+                            processedCount++
+                        }
+                    }
+                }
+            }
+            await eventStore.append({ type: "testEvent1", data: {}, metadata: {}, tags: Tags.createEmpty() })
+            await handlerCatchup.catchupHandlers(trackingHandlers)
+            expect(processedCount).toBe(1)
+
+            processedCount = 0
+            await handlerCatchup.catchupHandlers(trackingHandlers)
+            expect(processedCount).toBe(0)
+        })
     })
 })

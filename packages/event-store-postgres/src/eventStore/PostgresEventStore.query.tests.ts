@@ -255,6 +255,58 @@ describe("postgresEventStore.query", () => {
         })
     })
 
+    describe("boundary and combination tests", () => {
+        beforeEach(async () => {
+            await eventStore.append(new EventType1("ev-1"))
+            await eventStore.append(new EventType2("ev-2"))
+            await eventStore.append(new EventType2("ev-3"))
+        })
+
+        test("forward read with after = 2 should exclude event at position 2", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.all(), { after: new PostgresPosition(2) })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].position.equals(new PostgresPosition(3))).toBe(true)
+        })
+
+        test("backward read with after = 2 should exclude event at position 2", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.all(), { after: new PostgresPosition(2), backwards: true })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].position.equals(new PostgresPosition(1))).toBe(true)
+        })
+
+        test("should combine after + limit forward", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.all(), { after: new PostgresPosition(1), limit: 1 })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].position.equals(new PostgresPosition(2))).toBe(true)
+        })
+
+        test("should combine after + backwards + limit", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.all(), { after: new PostgresPosition(3), backwards: true, limit: 1 })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].position.equals(new PostgresPosition(2))).toBe(true)
+        })
+
+        test("should combine after + type filter + limit", async () => {
+            const events = await streamAllEventsToArray(
+                eventStore.read(Query.fromItems([{ types: ["testEvent2"], tags: Tags.createEmpty() }]), {
+                    after: new PostgresPosition(1),
+                    limit: 1
+                })
+            )
+            expect(events.length).toBe(1)
+            expect(events[0].event.type).toBe("testEvent2")
+            expect(events[0].position.equals(new PostgresPosition(2))).toBe(true)
+        })
+    })
+
     test("should allow two consequtive reads in same transaction wihtout throwing", async () => {
         await eventStore.append(new EventType1())
         await eventStore.append(new EventType2())

@@ -168,6 +168,30 @@ describe("memoryEventStore.append", () => {
             })
         })
 
+        describe("when append condition has multiple query items (OR semantics)", () => {
+            test("should throw when any query item matches", async () => {
+                const appendCondition: AppendCondition = {
+                    failIfEventsMatch: Query.fromItems([
+                        { types: ["nonExistentEvent"], tags: Tags.createEmpty() },
+                        { types: ["testEvent1"], tags: Tags.createEmpty() }
+                    ]),
+                    after: new NumericPosition(0)
+                }
+                await expect(eventStore.append(new EventType1(), appendCondition)).rejects.toThrow(AppendConditionError)
+            })
+
+            test("should succeed when no query items match", async () => {
+                const appendCondition: AppendCondition = {
+                    failIfEventsMatch: Query.fromItems([
+                        { types: ["nonExistentEvent1"], tags: Tags.createEmpty() },
+                        { types: ["nonExistentEvent2"], tags: Tags.createEmpty() }
+                    ]),
+                    after: new NumericPosition(0)
+                }
+                await expect(eventStore.append(new EventType1(), appendCondition)).resolves.not.toThrow()
+            })
+        })
+
         describe("when no append condition is provided", () => {
             test("should not throw any error", async () => {
                 await expect(eventStore.append(new EventType1())).resolves.not.toThrow()

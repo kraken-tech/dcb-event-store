@@ -99,5 +99,30 @@ describe("PostgresPosition", () => {
             const restored = PostgresPosition.parse(original.toString())
             expect(restored.equals(original)).toBe(true)
         })
+
+        test("should parse negative number string", () => {
+            const pos = PostgresPosition.parse("-5")
+            expect(pos.value).toBe(-5)
+        })
+
+        test("should parse large number string", () => {
+            const pos = PostgresPosition.parse("9999999")
+            expect(pos.value).toBe(9999999)
+        })
+
+        test("should produce NaN for non-numeric string", () => {
+            const pos = PostgresPosition.parse("abc")
+            expect(pos.value).toBeNaN()
+        })
+
+        test("should produce NaN for empty string", () => {
+            const pos = PostgresPosition.parse("")
+            expect(pos.value).toBeNaN()
+        })
+
+        test("should truncate decimal string to integer", () => {
+            const pos = PostgresPosition.parse("123.456")
+            expect(pos.value).toBe(123)
+        })
     })
 })

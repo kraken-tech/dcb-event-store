@@ -195,4 +195,39 @@ describe("buildDecisionModel", () => {
             expect(courseExists).toBe(true)
         })
     })
+
+    describe("when handler tagFilter matches no events but other handler does", () => {
+        let courseExistsForCourse1: boolean
+        let courseExistsForCourse2: boolean
+
+        beforeEach(async () => {
+            eventStore = new MemoryEventStore()
+            await eventStore.append(
+                new CourseWasRegisteredEvent({
+                    courseId: "course-1",
+                    capacity: 10
+                })
+            )
+
+            const result = await buildDecisionModel(eventStore, {
+                courseExistsForCourse1: CourseExists("course-1"),
+                courseExistsForCourse2: CourseExists("course-2")
+            })
+            courseExistsForCourse1 = result.state.courseExistsForCourse1
+            courseExistsForCourse2 = result.state.courseExistsForCourse2
+            appendCondition = result.appendCondition
+        })
+
+        test("should update matching handler state", () => {
+            expect(courseExistsForCourse1).toBe(true)
+        })
+
+        test("should retain init state for non-matching handler", () => {
+            expect(courseExistsForCourse2).toBe(false)
+        })
+
+        test("should set after to the last event position", () => {
+            expect(appendCondition.after!.equals(new NumericPosition(1))).toBe(true)
+        })
+    })
 })

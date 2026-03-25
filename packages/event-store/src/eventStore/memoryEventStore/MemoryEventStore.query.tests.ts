@@ -182,5 +182,53 @@ describe("memoryEventStore.query", () => {
             )
             expect(readCount).toBe(1)
         })
+
+        describe("boundary: event at exact after position is excluded", () => {
+            test("forward read with after = 2 should exclude event at position 2", async () => {
+                const events = await streamAllEventsToArray(
+                    eventStore.read(Query.all(), { after: new NumericPosition(2) })
+                )
+                expect(events.length).toBe(1)
+                expect(events[0].position.equals(new NumericPosition(3))).toBe(true)
+            })
+
+            test("backward read with after = 2 should exclude event at position 2", async () => {
+                const events = await streamAllEventsToArray(
+                    eventStore.read(Query.all(), { after: new NumericPosition(2), backwards: true })
+                )
+                expect(events.length).toBe(1)
+                expect(events[0].position.equals(new NumericPosition(1))).toBe(true)
+            })
+        })
+
+        describe("combined options: after + backwards + limit", () => {
+            test("should return limited events after position forward", async () => {
+                const events = await streamAllEventsToArray(
+                    eventStore.read(Query.all(), { after: new NumericPosition(1), limit: 1 })
+                )
+                expect(events.length).toBe(1)
+                expect(events[0].position.equals(new NumericPosition(2))).toBe(true)
+            })
+
+            test("should return limited events before position backward", async () => {
+                const events = await streamAllEventsToArray(
+                    eventStore.read(Query.all(), { after: new NumericPosition(3), backwards: true, limit: 1 })
+                )
+                expect(events.length).toBe(1)
+                expect(events[0].position.equals(new NumericPosition(2))).toBe(true)
+            })
+
+            test("should combine after + type filter + limit", async () => {
+                const events = await streamAllEventsToArray(
+                    eventStore.read(Query.fromItems([{ types: ["testEvent2"] }]), {
+                        after: new NumericPosition(1),
+                        limit: 1
+                    })
+                )
+                expect(events.length).toBe(1)
+                expect(events[0].event.type).toBe("testEvent2")
+                expect(events[0].position.equals(new NumericPosition(2))).toBe(true)
+            })
+        })
     })
 })
