@@ -23,7 +23,7 @@ export type AppendCondition = {
 
 export interface ReadOptions {
     backwards?: boolean
-    after?: SequencePosition
+    fromPosition?: SequencePosition
     limit?: number
 }
 

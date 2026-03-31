@@ -28,6 +28,8 @@ export class NumericPosition extends SequencePosition {
     }
 
     static parse(raw: string): NumericPosition {
-        return new NumericPosition(parseInt(raw, 10))
+        const value = parseInt(raw, 10)
+        if (isNaN(value)) throw new Error(`Invalid position value: "${raw}"`)
+        return new NumericPosition(value)
     }
 }

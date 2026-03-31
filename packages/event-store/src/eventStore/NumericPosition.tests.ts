@@ -124,14 +124,12 @@ describe("NumericPosition", () => {
             expect(pos.value).toBe(9999999)
         })
 
-        test("should produce NaN for non-numeric string", () => {
-            const pos = NumericPosition.parse("abc")
-            expect(pos.value).toBeNaN()
+        test("should throw for non-numeric string", () => {
+            expect(() => NumericPosition.parse("abc")).toThrow('Invalid position value: "abc"')
         })
 
-        test("should produce NaN for empty string", () => {
-            const pos = NumericPosition.parse("")
-            expect(pos.value).toBeNaN()
+        test("should throw for empty string", () => {
+            expect(() => NumericPosition.parse("")).toThrow('Invalid position value: ""')
         })
 
         test("should truncate decimal string to integer", () => {

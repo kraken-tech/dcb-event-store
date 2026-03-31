@@ -1,6 +1,5 @@
 import { DcbEvent, Query, SequencePosition } from "@dcb-es/event-store"
 import { ParamManager, dbEventConverter } from "./utils"
-import { PostgresPosition } from "./PostgresPosition"
 
 export const appendSql = (
     events: DcbEvent[],
@@ -30,7 +29,7 @@ export const appendSql = (
     const filterClause = (): string => {
         if (!failIfEventsMatch) return ""
 
-        const seqFilter = after ? `sequence_position > ${params.add((after as PostgresPosition).value)}::bigint` : null
+        const seqFilter = after ? `sequence_position > ${params.add(after.toString())}::bigint` : null
 
         if (failIfEventsMatch.isAll) {
             const conditions = seqFilter ? `WHERE ${seqFilter}` : ""
