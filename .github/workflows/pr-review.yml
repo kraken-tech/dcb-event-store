@@ -1,0 +1,61 @@
+name: Multi-Agent PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - agent: architecture
+            model: claude-opus-4-6
+          - agent: security
+            model: claude-sonnet-4-6
+          - agent: breaking-changes
+            model: claude-sonnet-4-6
+          - agent: code-quality
+            model: claude-sonnet-4-6
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read agent prompt
+        id: prompt
+        env:
+          AGENT_NAME: ${{ matrix.agent }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo 'PROMPT<<AGENT_PROMPT_DELIM'
+            echo "REPO: $REPO"
+            echo "PR NUMBER: $PR_NUMBER"
+            echo ""
+            cat ".github/pr-review-agents/${AGENT_NAME}.md"
+            echo ""
+            echo "The PR branch is already checked out. Use \`gh pr diff $PR_NUMBER\` to get the diff."
+            echo "Post your findings using \`gh pr comment $PR_NUMBER --body \"<findings>\"\`."
+            echo "Only post GitHub comments — do not submit review text as messages."
+            echo 'AGENT_PROMPT_DELIM'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.LITELLM_API_KEY }}
+          prompt: ${{ steps.prompt.outputs.PROMPT }}
+          claude_args: "--model ${{ matrix.model }} --allowedTools 'Bash(gh pr diff*),Bash(gh pr comment*),Bash(git diff*),Read,Glob,Grep'"
+        env:
+          ANTHROPIC_BASE_URL: ${{ vars.LITELLM_BASE_URL }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LITELLM_API_KEY }}
